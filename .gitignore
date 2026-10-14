@@ -1,0 +1,32 @@
+# Сборка и IDE
+/out/
+/build*/
+/.vs/
+/.vscode/
+/.idea/
+*.user
+*.user.*
+CMakeLists.txt.user*
+
+# Пресеты CMake — машинно-зависимые (путь к Qt, GUID отладчика QML),
+# генерируются Qt VS Tools локально
+CMakePresets.json
+CMakeUserPresets.json
+CMakeUserPresets.json.bak
+
+# Бинарники и промежуточные файлы
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.exp
+
+# Библиотека HUD — ставится пользователем отдельно, в репозитории и поставке её нет
+seirin.dll
+
+# Локальные данные лаунчера (на случай копии рядом с исходниками):
+# сессии аккаунтов и настройки
+accounts*.json
+RFVKLauncher.ini
