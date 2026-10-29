@@ -75,11 +75,12 @@ jobs:
         with:
           arch: x64
 
+      # Аргументы -D… в кавычках: PowerShell иначе режет «-DX=0.1.1» на точке.
       - name: Настройка
         run: >
           cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DRFVK_VERSION=${{ steps.ver.outputs.version }}
+          "-DCMAKE_BUILD_TYPE=Release"
+          "-DRFVK_VERSION=${{ steps.ver.outputs.version }}"
 
       - name: Сборка
         run: cmake --build build

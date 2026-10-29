@@ -3,6 +3,9 @@ cmake_minimum_required(VERSION 3.21)
 # Версия: по умолчанию отсюда, сборка релиза в CI передаёт её из тега
 # (1.2.3 → -DRFVK_VERSION=1.2.3).
 set(RFVK_VERSION "0.1.0" CACHE STRING "Версия лаунчера (X.Y.Z)")
+if(NOT RFVK_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "RFVK_VERSION='${RFVK_VERSION}' — нужен формат X.Y.Z (например 0.2.0)")
+endif()
 project(RFVKLauncher VERSION ${RFVK_VERSION} LANGUAGES CXX)
 
 # Лаунчер — x64 (готовый Qt 6 для MSVC есть только 64-битный). 32-битная
