@@ -47,12 +47,27 @@ jobs:
           "archive=RFVKLauncher-$label-win64" >> $env:GITHUB_OUTPUT
           "prerelease=$($prerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
-      - name: Qt ${{ env.QT_VERSION }}
-        uses: jurplel/install-qt-action@v4
+      # Qt ставит свой скрипт прямо из репозитория Qt: aqtinstall (и
+      # install-qt-action) пока не понимает раскладку Qt 6.11. Кэш — по версии
+      # Qt и содержимому скрипта.
+      - name: Кэш Qt
+        id: qt-cache
+        uses: actions/cache@v4
         with:
-          version: ${{ env.QT_VERSION }}
-          arch: win64_msvc2022_64
-          cache: true
+          path: ${{ runner.temp }}/Qt
+          key: qt-${{ env.QT_VERSION }}-msvc2022_64-${{ hashFiles('ci/install-qt.ps1') }}
+
+      - name: Qt ${{ env.QT_VERSION }}
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./ci/install-qt.ps1 -Version $env:QT_VERSION -OutDir "$env:RUNNER_TEMP/Qt"
+
+      - name: Путь к Qt
+        shell: pwsh
+        run: |
+          $qt = "$env:RUNNER_TEMP/Qt/$env:QT_VERSION/msvc2022_64"
+          "CMAKE_PREFIX_PATH=$qt" >> $env:GITHUB_ENV
+          "$qt/bin" >> $env:GITHUB_PATH
 
       # Консоль разработчика x64 для Ninja; x86-DLL CMake соберёт сам через
       # генератор Visual Studio с -A Win32.
