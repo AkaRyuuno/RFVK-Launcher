@@ -94,8 +94,6 @@ QtObject {
     readonly property string settingsHudDesc: "После запуска клиента автоматически подключать библиотеку улучшенного интерфейса (seirin.dll), если она лежит рядом с лаунчером. Не нравится вид — выключите."
     readonly property string settingsHudMissingTitle: "Библиотека не найдена."
     readonly property string settingsHudMissingBody: "Положите seirin.dll в папку с лаунчером. Пока её нет, подключение при запуске пропускается."
-    readonly property string settingsHudNoInjectorTitle: "Не найден компонент лаунчера."
-    readonly property string settingsHudNoInjectorBody: "Рядом с лаунчером нет rfvk_inject.exe — без него HUD не подключить. Переустановите лаунчер."
 
     // Автовход (карточка в панели аккаунта и настройка).
     readonly property string autoTitle: "Автовход"
@@ -116,7 +114,7 @@ QtObject {
     readonly property string settingsAutoTitle: "Автовход в игру"
     readonly property string settingsAutoDesc: "После запуска клиент сам выбирает «Сервер 1», нажимает «Начать игру», вводит FG-пароль и входит выбранным персонажем. Пароль и персонаж задаются в панели аккаунта."
     readonly property string settingsAutoMissingTitle: "Не найден компонент лаунчера."
-    readonly property string settingsAutoMissingBody: "Рядом с лаунчером нет rfvk_autologin.dll или rfvk_inject.exe — автовход не сработает. Переустановите лаунчер."
+    readonly property string settingsAutoMissingBody: "Рядом с лаунчером нет rfvk_autologin.dll — автовход не сработает. Переустановите лаунчер."
 
     // Диалог удаления.
     readonly property string confirmDeleteTitle: "Удалить аккаунт?"

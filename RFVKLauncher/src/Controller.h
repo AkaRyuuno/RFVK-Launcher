@@ -49,9 +49,6 @@ class Controller : public QObject {
     // hudAvailable — лежит ли библиотека рядом с лаунчером (иначе шаг пропускается).
     Q_PROPERTY(bool hudEnabled READ hudEnabled WRITE setHudEnabled NOTIFY hudChanged)
     Q_PROPERTY(bool hudAvailable READ hudAvailable NOTIFY hudChanged)
-    // Что именно отсутствует (для текста предупреждения в настройках).
-    Q_PROPERTY(bool hudDllFound READ hudDllFound NOTIFY hudChanged)
-    Q_PROPERTY(bool hudInjectorFound READ hudInjectorFound NOTIFY hudChanged)
     // Автовход: после запуска клиент сам выбирает «Сервер 1», жмёт «Начать
     // игру», вводит FG и входит выбранным персонажем (настройка; по умолчанию вкл).
     // autoLoginAvailable — лежит ли rfvk_autologin.dll рядом с лаунчером.
@@ -87,8 +84,6 @@ public:
     QString theme() const { return m_theme; }
     bool hudEnabled() const { return m_hudEnabled; }
     bool hudAvailable() const { return HudInjector::dllAvailable(); }
-    bool hudDllFound() const { return HudInjector::dllFound(); }
-    bool hudInjectorFound() const { return HudInjector::injectorFound(); }
     bool autoLoginEnabled() const { return m_autoLoginEnabled; }
     bool autoLoginAvailable() const { return HudInjector::autoLoginAvailable(); }
 
@@ -110,7 +105,7 @@ public slots:
     void setGameDir(const QString &dir);
     void setTheme(const QString &t);
     void setHudEnabled(bool on);
-    // Перечитать наличие seirin.dll/инжектора на диске (файл могли положить,
+    // Перечитать наличие seirin.dll/rfvk_autologin.dll на диске (файл могли положить,
     // пока лаунчер открыт) — зовётся при открытии настроек.
     void refreshHudStatus() { emit hudChanged(); emit autoLoginChanged(); }
     void setAutoLoginEnabled(bool on);

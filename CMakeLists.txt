@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.21)
 
 project(RFVKLauncher VERSION 0.1.0 LANGUAGES CXX)
 
+# Лаунчер — x64 (готовый Qt 6 для MSVC есть только 64-битный). 32-битная
+# часть (rfvk_autologin.dll) собирается отдельно — см. RFVKLauncher/CMakeLists.txt.
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "Лаунчер собирается только под x64: запустите CMake из консоли "
+                        "разработчика x64 (vcvars64.bat) или выберите пресет *-x64.")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

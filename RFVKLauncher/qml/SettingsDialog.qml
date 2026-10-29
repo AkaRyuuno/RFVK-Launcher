@@ -135,7 +135,7 @@ Popup {
                 }
             }
 
-            // Не найдена библиотека (или, реже, инжектор из поставки) — подключать нечего.
+            // Не найдена библиотека — подключать нечего.
             Rectangle {
                 width: parent.width
                 visible: App.hudEnabled && !App.hudAvailable
@@ -156,12 +156,12 @@ Popup {
                     anchors.top: parent.top; anchors.topMargin: Theme.s12
                     spacing: 2
                     AppText {
-                        text: App.hudDllFound ? Strings.settingsHudNoInjectorTitle : Strings.settingsHudMissingTitle
+                        text: Strings.settingsHudMissingTitle
                         role: "small"; font.weight: Font.DemiBold; color: Theme.warn
                     }
                     AppText {
                         width: parent.width
-                        text: App.hudDllFound ? Strings.settingsHudNoInjectorBody : Strings.settingsHudMissingBody
+                        text: Strings.settingsHudMissingBody
                         role: "small"; color: Theme.muted; wrapMode: Text.WordWrap
                     }
                 }
