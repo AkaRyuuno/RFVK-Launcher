@@ -1,5 +1,7 @@
 #include "Controller.h"
+#include "AutoLoginSession.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QProcess>
@@ -17,6 +19,29 @@ QString accountsWord(int n)
         return QStringLiteral("%1 аккаунта").arg(n);
     return QStringLiteral("%1 аккаунтов").arg(n);
 }
+
+// Раса × 2 + пол (как у клиента) → название расы.
+QString raceName(int race)
+{
+    switch (race / 2) {
+    case 0: return QStringLiteral("Беллато");
+    case 1: return QStringLiteral("Кора");
+    case 2: return QStringLiteral("Акретия");
+    default: return QString();
+    }
+}
+
+// FG-пароль клиента: печатные ASCII-символы, не длиннее 12 (буфер запроса — 13 байт).
+constexpr int kFgMaxLen = 12;
+bool validFg(const QString &fg)
+{
+    if (fg.size() > kFgMaxLen)
+        return false;
+    for (const QChar ch : fg)
+        if (ch.unicode() < 0x21 || ch.unicode() > 0x7E)
+            return false;
+    return true;
+}
 } // namespace
 
 Controller::Controller(AccountModel *model, IAuthBackend *backend, QObject *parent)
@@ -28,10 +53,18 @@ Controller::Controller(AccountModel *model, IAuthBackend *backend, QObject *pare
     m_gameDir = m_settings.value(QStringLiteral("gameDir")).toString();
     m_theme = m_settings.value(QStringLiteral("theme"), QStringLiteral("dark")).toString();
     m_hudEnabled = m_settings.value(QStringLiteral("hudEnabled"), false).toBool();
+    m_autoLoginEnabled = m_settings.value(QStringLiteral("autoLogin"), true).toBool();
 
     // Подключение HUD: свои строки пишет в общий журнал.
     m_hud = new HudInjector(this);
     connect(m_hud, &HudInjector::log, this, &Controller::appendLog);
+    // Библиотека автовхода не подключилась — его сессии ждать нечего.
+    connect(m_hud, &HudInjector::failed, this, [this](qint64 pid, const QString &dll) {
+        if (dll != HudInjector::autoLoginDllPath())
+            return;
+        if (AutoLoginSession *s = m_autoSessions.value(pid))
+            s->abandon();
+    });
     QStringList saved = m_settings.value(QStringLiteral("selection")).toStringList();
     if (saved.isEmpty()) // совместимость с прежним одиночным выбором
         saved = QStringList{m_settings.value(QStringLiteral("lastLoginId")).toString()};
@@ -102,6 +135,9 @@ void Controller::connectBackend()
         if (ok) {
             ++m_batchOk;
             clearError(m_current.id);
+            // Удалённому аккаунту настройки автовхода больше не нужны.
+            if (m_current.kind == OpKind::Delete)
+                m_autoStore.remove(m_current.id);
             // В пакете успешные тосты заменяются одной сводкой в конце.
             if (m_batchTotal <= 1)
                 emit toast(msg, 1);
@@ -196,6 +232,20 @@ QVariantMap Controller::accountMap(const Account &a) const
     m[QStringLiteral("sessionRefreshed")] = a.sessionRefreshed;
     m[QStringLiteral("initials")] = AccountModel::initialsOf(a.nick.isEmpty() ? a.login : a.nick);
     m[QStringLiteral("error")] = m_errors.value(a.id);
+    // Автовход: задан ли FG (сам пароль в QML не попадает), сохранённые
+    // персонажи и выбранный.
+    m[QStringLiteral("fgSet")] = m_autoStore.hasFg(a.id);
+    QVariantList chars;
+    for (const SavedCharacter &c : m_autoStore.characters(a.id)) {
+        QVariantMap cm;
+        cm[QStringLiteral("slot")] = c.slot;
+        cm[QStringLiteral("name")] = c.name;
+        cm[QStringLiteral("level")] = c.level;
+        cm[QStringLiteral("race")] = raceName(c.race);
+        chars << cm;
+    }
+    m[QStringLiteral("characters")] = chars;
+    m[QStringLiteral("autoChar")] = m_autoStore.chosenName(a.id);
     return m;
 }
 
@@ -442,6 +492,108 @@ void Controller::setHudEnabled(bool on)
     emit hudChanged();
 }
 
+void Controller::setAutoLoginEnabled(bool on)
+{
+    if (m_autoLoginEnabled == on)
+        return;
+    m_autoLoginEnabled = on;
+    m_settings.setValue(QStringLiteral("autoLogin"), on);
+    emit autoLoginChanged();
+}
+
+void Controller::setAccountFg(const QString &id, const QString &fg)
+{
+    if (m_model->indexOfId(id) < 0)
+        return;
+    const QString clean = fg.trimmed();
+    if (!validFg(clean)) {
+        emit toast(QStringLiteral("FG-пароль: латиница, цифры и знаки, до %1 символов").arg(kFgMaxLen), 2);
+        return;
+    }
+    m_autoStore.setFg(id, clean);
+    emit toast(clean.isEmpty() ? QStringLiteral("FG-пароль удалён — вводите вручную")
+                               : QStringLiteral("FG-пароль сохранён"),
+               1);
+    emit selectionChanged(); // selectedAccount несёт fgSet
+}
+
+void Controller::setAccountCharacter(const QString &id, const QString &name)
+{
+    if (m_model->indexOfId(id) < 0)
+        return;
+    int slot = -1;
+    if (!name.isEmpty()) {
+        for (const SavedCharacter &c : m_autoStore.characters(id))
+            if (c.name == name)
+                slot = c.slot;
+        if (slot < 0)
+            return; // не из сохранённого списка
+    }
+    m_autoStore.setChosen(id, name, slot);
+    emit selectionChanged();
+}
+
+void Controller::startAutoLogin(qint64 pid, const QString &accountId, const QString &nick)
+{
+    if (pid <= 0 || !m_autoLoginEnabled || !HudInjector::autoLoginAvailable())
+        return;
+    if (AutoLoginSession *old = m_autoSessions.take(pid)) // PID переиспользован
+        old->deleteLater();
+
+    AutoLoginSession::Config cfg;
+    cfg.accountId = accountId;
+    cfg.nick = nick;
+    cfg.fg = m_autoStore.fg(accountId);
+    cfg.charName = m_autoStore.chosenName(accountId);
+    cfg.charSlot = m_autoStore.chosenSlot(accountId);
+
+    auto *session = new AutoLoginSession(pid, cfg, this);
+    cfg.fg.fill(char(0));
+    connect(session, &AutoLoginSession::log, this, &Controller::appendLog);
+    connect(session, &AutoLoginSession::charactersFound, this, &Controller::onCharactersFound);
+    connect(session, &AutoLoginSession::ended, this, [this](qint64 endedPid) {
+        if (AutoLoginSession *s = m_autoSessions.take(endedPid))
+            s->deleteLater();
+    });
+    if (!session->open()) {
+        session->deleteLater();
+        return;
+    }
+    m_autoSessions.insert(pid, session);
+
+    QStringList steps{QStringLiteral("сервер"), QStringLiteral("«Начать игру»")};
+    steps << (m_autoStore.hasFg(accountId) ? QStringLiteral("FG") : QStringLiteral("FG — вручную"));
+    steps << (cfg.charName.isEmpty() ? QStringLiteral("персонаж — вручную") : QStringLiteral("персонаж ") + cfg.charName);
+    appendLog(QStringLiteral("Автовход: ") + steps.join(QStringLiteral(" → ")) + QStringLiteral(" · ") + nick, 0);
+    m_hud->attachLibrary(pid, HudInjector::autoLoginDllPath(), QStringLiteral("Автовход"), nick);
+}
+
+void Controller::onCharactersFound(const QString &accountId, const QList<SavedCharacter> &list)
+{
+    if (m_model->indexOfId(accountId) < 0)
+        return;
+    m_autoStore.setCharacters(accountId, list);
+    // Выбранного персонажа больше нет на аккаунте (удалён/переименован) — сбросить выбор.
+    const QString chosen = m_autoStore.chosenName(accountId);
+    if (!chosen.isEmpty()) {
+        bool still = false;
+        for (const SavedCharacter &c : list)
+            if (c.name == chosen) {
+                still = true;
+                m_autoStore.setChosen(accountId, c.name, c.slot); // слот мог смениться
+            }
+        if (!still)
+            m_autoStore.setChosen(accountId, QString(), -1);
+    }
+    QStringList names;
+    for (const SavedCharacter &c : list)
+        names << c.name;
+    appendLog(QStringLiteral("Персонажи аккаунта сохранены: ")
+                  + (names.isEmpty() ? QStringLiteral("нет") : names.join(QStringLiteral(", "))),
+              1);
+    emit selectionChanged();
+}
+
 void Controller::recomputeGameStatus()
 {
     m_gameDirValid = !m_gameDir.isEmpty()
@@ -451,6 +603,13 @@ void Controller::recomputeGameStatus()
     m_gameCenterFound = !local.isEmpty() && QFileInfo::exists(QDir(local).filePath(QStringLiteral("GameCenter")));
     if (qEnvironmentVariableIsSet("RFVK_NOGC")) // для скриншота состояния «GameCenter не найден»
         m_gameCenterFound = false;
+}
+
+void Controller::logStartup()
+{
+    appendLog(QStringLiteral("RFVK Launcher %1 · Qt %2")
+                  .arg(QCoreApplication::applicationVersion(), QString::fromLatin1(qVersion())),
+              0);
 }
 
 void Controller::appendLog(const QString &text, int level)
@@ -500,6 +659,8 @@ void Controller::startGame(const QString &accountId, const QString &persId, cons
         // запуск при неудаче; пропускается, если библиотеки нет рядом с лаунчером).
         if (m_hudEnabled && HudInjector::dllAvailable())
             m_hud->attach(pid, nick);
+        // Автовход: сервер, «Начать игру», FG и персонаж — за игрока.
+        startAutoLogin(pid, accountId, nick);
     } else {
         const QString msg = QStringLiteral("Не удалось запустить RF_Online.exe");
         appendLog(msg, 2);

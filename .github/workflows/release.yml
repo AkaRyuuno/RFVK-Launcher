@@ -1,0 +1,115 @@
+# Сборка релиза: на тег X.Y.Z собирает лаунчер (x64) и rfvk_autologin.dll (x86),
+# упаковывает поставку в zip и публикует GitHub Release с этим архивом.
+#
+#   git tag 0.2.0 && git push origin 0.2.0
+#
+# Тег с суффиксом (0.2.0-beta1) публикуется как pre-release.
+# Запуск вручную (Actions → Release → Run workflow) только собирает архив
+# и прикладывает его к запуску как artifact, без релиза.
+
+name: Release
+
+on:
+  push:
+    tags: ['[0-9]*.[0-9]*.[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  QT_VERSION: '6.11.2'
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Версия из тега
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = '${{ github.ref_name }}'
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            if ($ref -notmatch '^(\d+\.\d+\.\d+)(-.+)?$') {
+              throw "Тег '$ref' не похож на X.Y.Z или X.Y.Z-суффикс"
+            }
+            $version = $Matches[1]
+            $label = $ref
+            $prerelease = [bool]$Matches[2]
+          } else {
+            $version = '0.0.0'
+            $label = "dev-$($env:GITHUB_SHA.Substring(0, 7))"
+            $prerelease = $true
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "archive=RFVKLauncher-$label-win64" >> $env:GITHUB_OUTPUT
+          "prerelease=$($prerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      # Qt ставит свой скрипт прямо из репозитория Qt: aqtinstall (и
+      # install-qt-action) пока не понимает раскладку Qt 6.11. Кэш — по версии
+      # Qt и содержимому скрипта.
+      - name: Кэш Qt
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: qt-${{ env.QT_VERSION }}-msvc2022_64-${{ hashFiles('ci/install-qt.ps1') }}
+
+      - name: Qt ${{ env.QT_VERSION }}
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./ci/install-qt.ps1 -Version $env:QT_VERSION -OutDir "$env:RUNNER_TEMP/Qt"
+
+      - name: Путь к Qt
+        shell: pwsh
+        run: |
+          $qt = "$env:RUNNER_TEMP/Qt/$env:QT_VERSION/msvc2022_64"
+          "CMAKE_PREFIX_PATH=$qt" >> $env:GITHUB_ENV
+          "$qt/bin" >> $env:GITHUB_PATH
+
+      # Консоль разработчика x64 для Ninja; x86-DLL CMake соберёт сам через
+      # генератор Visual Studio с -A Win32.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Аргументы -D… в кавычках: PowerShell иначе режет «-DX=0.1.1» на точке.
+      - name: Настройка
+        run: >
+          cmake -S . -B build -G Ninja
+          "-DCMAKE_BUILD_TYPE=Release"
+          "-DRFVK_VERSION=${{ steps.ver.outputs.version }}"
+
+      - name: Сборка
+        run: cmake --build build
+
+      - name: Поставка
+        shell: pwsh
+        run: |
+          $dist = "${{ steps.ver.outputs.archive }}"
+          cmake --install build --prefix $dist
+          foreach ($f in 'RFVKLauncher.exe', 'rfvk_autologin.dll') {
+            if (-not (Test-Path "$dist/$f")) { throw "В поставке нет $f" }
+          }
+          Compress-Archive -Path "$dist/*" -DestinationPath "$dist.zip"
+          (Get-FileHash "$dist.zip" -Algorithm SHA256).Hash.ToLower() + "  $dist.zip" |
+            Out-File "$dist.zip.sha256" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.archive }}
+          path: |
+            ${{ steps.ver.outputs.archive }}.zip
+            ${{ steps.ver.outputs.archive }}.zip.sha256
+
+      - name: GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.ver.outputs.archive }}.zip
+            ${{ steps.ver.outputs.archive }}.zip.sha256
+          prerelease: ${{ steps.ver.outputs.prerelease }}
+          generate_release_notes: true

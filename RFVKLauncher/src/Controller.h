@@ -1,5 +1,6 @@
 #pragma once
 #include "AccountModel.h"
+#include "AutoLoginStore.h"
 #include "HudInjector.h"
 #include "IAuthBackend.h"
 #include <QHash>
@@ -18,6 +19,8 @@
 // Действия «Запустить», «Обновить сессию», «Удалить» применяются ко всем
 // выделенным аккаунтам: контроллер ставит их в очередь и подаёт бэкенду по
 // одной операции (бэкенд выполняет операции последовательно).
+class AutoLoginSession;
+
 class Controller : public QObject {
     Q_OBJECT
     Q_PROPERTY(AccountModel *accounts READ accounts CONSTANT)
@@ -46,9 +49,11 @@ class Controller : public QObject {
     // hudAvailable — лежит ли библиотека рядом с лаунчером (иначе шаг пропускается).
     Q_PROPERTY(bool hudEnabled READ hudEnabled WRITE setHudEnabled NOTIFY hudChanged)
     Q_PROPERTY(bool hudAvailable READ hudAvailable NOTIFY hudChanged)
-    // Что именно отсутствует (для текста предупреждения в настройках).
-    Q_PROPERTY(bool hudDllFound READ hudDllFound NOTIFY hudChanged)
-    Q_PROPERTY(bool hudInjectorFound READ hudInjectorFound NOTIFY hudChanged)
+    // Автовход: после запуска клиент сам выбирает «Сервер 1», жмёт «Начать
+    // игру», вводит FG и входит выбранным персонажем (настройка; по умолчанию вкл).
+    // autoLoginAvailable — лежит ли rfvk_autologin.dll рядом с лаунчером.
+    Q_PROPERTY(bool autoLoginEnabled READ autoLoginEnabled WRITE setAutoLoginEnabled NOTIFY autoLoginChanged)
+    Q_PROPERTY(bool autoLoginAvailable READ autoLoginAvailable NOTIFY autoLoginChanged)
 
 public:
     // Состояние сессии для QML: Controller.Active, Controller.Expiring и т.д.
@@ -79,8 +84,8 @@ public:
     QString theme() const { return m_theme; }
     bool hudEnabled() const { return m_hudEnabled; }
     bool hudAvailable() const { return HudInjector::dllAvailable(); }
-    bool hudDllFound() const { return HudInjector::dllFound(); }
-    bool hudInjectorFound() const { return HudInjector::injectorFound(); }
+    bool autoLoginEnabled() const { return m_autoLoginEnabled; }
+    bool autoLoginAvailable() const { return HudInjector::autoLoginAvailable(); }
 
 public slots:
     // Выбор: одиночный (обычный клик), переключение (Ctrl+клик), диапазон
@@ -100,9 +105,14 @@ public slots:
     void setGameDir(const QString &dir);
     void setTheme(const QString &t);
     void setHudEnabled(bool on);
-    // Перечитать наличие seirin.dll/инжектора на диске (файл могли положить,
+    // Перечитать наличие seirin.dll/rfvk_autologin.dll на диске (файл могли положить,
     // пока лаунчер открыт) — зовётся при открытии настроек.
-    void refreshHudStatus() { emit hudChanged(); }
+    void refreshHudStatus() { emit hudChanged(); emit autoLoginChanged(); }
+    void setAutoLoginEnabled(bool on);
+    // FG-пароль аккаунта для автовхода (пусто — удалить, вводить вручную).
+    void setAccountFg(const QString &id, const QString &fg);
+    // Персонаж для автовхода по имени из сохранённого списка (пусто — не выбирать).
+    void setAccountCharacter(const QString &id, const QString &name);
     void dismissError();
 
 signals:
@@ -114,10 +124,15 @@ signals:
     void gameStatusChanged();
     void themeChanged();
     void hudChanged();
+    void autoLoginChanged();
     // Строка в консоль лога: время (ЧЧ:ММ:СС), текст, уровень (0/1/2).
     void logLine(const QString &time, const QString &text, int level);
     // Короткое уведомление-тост: текст, вид (0 инфо, 1 успех, 2 ошибка).
     void toast(const QString &text, int kind);
+
+public:
+    // Первая строка журнала: версия лаунчера и Qt (звать после загрузки QML).
+    void logStartup();
 
 private:
     enum class OpKind { Import, Launch, Refresh, Delete };
@@ -128,6 +143,9 @@ private:
     void appendLog(const QString &text, int level);
     // Реальный старт процесса RF_Online.exe после подтверждения сессии бэкендом.
     void startGame(const QString &accountId, const QString &persId, const QString &code);
+    // Автовход для только что запущенного клиента (по настройке).
+    void startAutoLogin(qint64 pid, const QString &accountId, const QString &nick);
+    void onCharactersFound(const QString &accountId, const QList<SavedCharacter> &list);
 
     // Очередь операций: enqueue -> pump подаёт бэкенду по одной -> opDone.
     void enqueue(OpKind kind, const QStringList &ids);
@@ -153,6 +171,9 @@ private:
     QString m_gameDir;
     QString m_theme = QStringLiteral("dark");
     bool m_hudEnabled = false;
+    bool m_autoLoginEnabled = true;
+    AutoLoginStore m_autoStore;
+    QHash<qint64, AutoLoginSession *> m_autoSessions; // pid клиента -> сессия автовхода
     QString m_progressStep;
     int m_progressIndex = 0;
     int m_progressTotal = 0;

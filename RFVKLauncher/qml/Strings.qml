@@ -21,6 +21,7 @@ QtObject {
     // Несколько выделенных аккаунтов.
     readonly property string multiHint: "Действия — для всех выделенных"
     readonly property string sidebarMultiHint: "Ctrl / Shift + клик — выбрать несколько"
+    function versionLabel(v) { return "RFVK Launcher " + v }
     readonly property string removeFromSelection: "Убрать из выделения"
     function selectedTitle(n) { return "Выбрано: " + accountsN(n) }
     function launchN(n) { return "Запустить RF Online · " + n }
@@ -94,8 +95,27 @@ QtObject {
     readonly property string settingsHudDesc: "После запуска клиента автоматически подключать библиотеку улучшенного интерфейса (seirin.dll), если она лежит рядом с лаунчером. Не нравится вид — выключите."
     readonly property string settingsHudMissingTitle: "Библиотека не найдена."
     readonly property string settingsHudMissingBody: "Положите seirin.dll в папку с лаунчером. Пока её нет, подключение при запуске пропускается."
-    readonly property string settingsHudNoInjectorTitle: "Не найден компонент лаунчера."
-    readonly property string settingsHudNoInjectorBody: "Рядом с лаунчером нет rfvk_inject.exe — без него HUD не подключить. Переустановите лаунчер."
+
+    // Автовход (карточка в панели аккаунта и настройка).
+    readonly property string autoTitle: "Автовход"
+    readonly property string autoSteps: "Сервер 1 → «Начать игру» → FG → персонаж"
+    readonly property string autoOff: "Выключен в настройках"
+    readonly property string autoMissing: "Нет rfvk_autologin.dll рядом с лаунчером"
+    readonly property string autoFgEmpty: "FG не задан"
+    readonly property string autoFgReplace: "FG сохранён"
+    readonly property string autoFgSave: "Сохранить"
+    readonly property string autoCharNone: "Не выбирать — выберу сам"
+    readonly property string autoCharUnknown: "Персонажи — после входа"
+    function charLabel(name, level, race) {
+        var parts = [name]
+        if (level > 0) parts.push(level + " ур.")
+        if (race && race.length) parts.push(race)
+        return parts.join(" · ")
+    }
+    readonly property string settingsAutoTitle: "Автовход в игру"
+    readonly property string settingsAutoDesc: "После запуска клиент сам выбирает «Сервер 1», нажимает «Начать игру», вводит FG-пароль и входит выбранным персонажем. Пароль и персонаж задаются в панели аккаунта."
+    readonly property string settingsAutoMissingTitle: "Не найден компонент лаунчера."
+    readonly property string settingsAutoMissingBody: "Рядом с лаунчером нет rfvk_autologin.dll — автовход не сработает. Переустановите лаунчер."
 
     // Диалог удаления.
     readonly property string confirmDeleteTitle: "Удалить аккаунт?"

@@ -85,6 +85,7 @@ int main(int argc, char *argv[])
     engine.loadFromModule("Rfvk", "Main");
     if (engine.rootObjects().isEmpty())
         return -1;
+    controller->logStartup();
 
     // Режим скриншота (для визуальной сверки с макетом): RFVK_SHOT=путь.png —
     // через 1.8 c окно снимается в PNG и приложение закрывается.
