@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls.Basic
 import Rfvk
 
-// Настройки лаунчера: внешний вид и автоподключение улучшенного HUD.
+// Настройки лаунчера: внешний вид, автовход и автоподключение улучшенного HUD.
 Popup {
     id: dlg
     modal: true
@@ -57,6 +57,56 @@ Popup {
                 anchors.verticalCenter: parent.verticalCenter
                 checked: App.theme === "dark"
                 onToggled: App.setTheme(value ? "dark" : "light")
+            }
+        }
+
+        Rectangle { width: parent.width; height: 1; color: Theme.border }
+
+        // ── Автовход ──
+        Column {
+            width: parent.width
+            spacing: Theme.s12
+
+            Row {
+                width: parent.width
+                spacing: Theme.s12
+                Column {
+                    width: parent.width - autoToggle.width - Theme.s12
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 2
+                    AppText { text: Strings.settingsAutoTitle; role: "bodyStrong" }
+                    AppText { width: parent.width; text: Strings.settingsAutoDesc; role: "small"; color: Theme.muted; wrapMode: Text.WordWrap }
+                }
+                AppToggle {
+                    id: autoToggle
+                    anchors.verticalCenter: parent.verticalCenter
+                    checked: App.autoLoginEnabled
+                    onToggled: App.setAutoLoginEnabled(value)
+                }
+            }
+
+            Rectangle {
+                width: parent.width
+                visible: App.autoLoginEnabled && !App.autoLoginAvailable
+                radius: Theme.rField
+                color: Theme.badgeFill(Theme.warn)
+                border.width: 1; border.color: Qt.rgba(Theme.warn.r, Theme.warn.g, Theme.warn.b, 0.4)
+                implicitHeight: autoCol.implicitHeight + 2 * Theme.s12
+                Icon {
+                    id: autoIcon
+                    anchors.left: parent.left; anchors.leftMargin: Theme.s12
+                    anchors.top: parent.top; anchors.topMargin: Theme.s12
+                    name: "warn"; color: Theme.warn; size: 16
+                }
+                Column {
+                    id: autoCol
+                    anchors.left: autoIcon.right; anchors.leftMargin: Theme.s8
+                    anchors.right: parent.right; anchors.rightMargin: Theme.s12
+                    anchors.top: parent.top; anchors.topMargin: Theme.s12
+                    spacing: 2
+                    AppText { text: Strings.settingsAutoMissingTitle; role: "small"; font.weight: Font.DemiBold; color: Theme.warn }
+                    AppText { width: parent.width; text: Strings.settingsAutoMissingBody; role: "small"; color: Theme.muted; wrapMode: Text.WordWrap }
+                }
             }
         }
 

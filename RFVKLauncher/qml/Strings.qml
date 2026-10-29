@@ -97,6 +97,27 @@ QtObject {
     readonly property string settingsHudNoInjectorTitle: "Не найден компонент лаунчера."
     readonly property string settingsHudNoInjectorBody: "Рядом с лаунчером нет rfvk_inject.exe — без него HUD не подключить. Переустановите лаунчер."
 
+    // Автовход (карточка в панели аккаунта и настройка).
+    readonly property string autoTitle: "Автовход"
+    readonly property string autoSteps: "Сервер 1 → «Начать игру» → FG → персонаж"
+    readonly property string autoOff: "Выключен в настройках"
+    readonly property string autoMissing: "Нет rfvk_autologin.dll рядом с лаунчером"
+    readonly property string autoFgEmpty: "FG не задан"
+    readonly property string autoFgReplace: "FG сохранён"
+    readonly property string autoFgSave: "Сохранить"
+    readonly property string autoCharNone: "Не выбирать — выберу сам"
+    readonly property string autoCharUnknown: "Персонажи — после входа"
+    function charLabel(name, level, race) {
+        var parts = [name]
+        if (level > 0) parts.push(level + " ур.")
+        if (race && race.length) parts.push(race)
+        return parts.join(" · ")
+    }
+    readonly property string settingsAutoTitle: "Автовход в игру"
+    readonly property string settingsAutoDesc: "После запуска клиент сам выбирает «Сервер 1», нажимает «Начать игру», вводит FG-пароль и входит выбранным персонажем. Пароль и персонаж задаются в панели аккаунта."
+    readonly property string settingsAutoMissingTitle: "Не найден компонент лаунчера."
+    readonly property string settingsAutoMissingBody: "Рядом с лаунчером нет rfvk_autologin.dll или rfvk_inject.exe — автовход не сработает. Переустановите лаунчер."
+
     // Диалог удаления.
     readonly property string confirmDeleteTitle: "Удалить аккаунт?"
     readonly property string confirmDeleteYes: "Удалить"

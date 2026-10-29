@@ -26,16 +26,31 @@ public:
     // Есть ли что подключать: присутствует и библиотека, и инжектор.
     static bool dllAvailable();
 
-    // Дождаться видимого окна процесса pid и подключить к нему библиотеку.
+    // Библиотека автовхода (часть поставки, собирается вместе с инжектором).
+    static QString autoLoginDllPath();
+    static bool autoLoginAvailable(); // rfvk_autologin.dll и инжектор на месте
+
+    // Дождаться видимого окна процесса pid и подключить к нему библиотеку HUD.
     // Итог приходит сигналом log() (идёт в журнал лаунчера).
     void attach(qint64 pid, const QString &nick);
+    // То же для произвольной библиотеки; tag — подпись строк журнала («HUD»,
+    // «Автовход»). Неудачу сообщает сигналом log() и failed(pid).
+    void attachLibrary(qint64 pid, const QString &dll, const QString &tag, const QString &nick);
 
 signals:
     // Строка для журнала: текст и уровень (0 — обычная, 1 — успех, 2 — ошибка).
     void log(const QString &text, int level);
+    // Библиотека не подключена (клиент закрылся, окно не появилось, инжектор упал).
+    void failed(qint64 pid, const QString &dll);
 
 private:
+    struct Job {
+        qint64 pid = 0;
+        QString dll;
+        QString tag;
+        QString nick;
+    };
     // Ждёт появления видимого верхнеуровневого окна у pid; затем inject().
-    void waitForWindow(qint64 pid, const QString &nick, int elapsedMs);
-    void inject(qint64 pid, const QString &nick);
+    void waitForWindow(const Job &job, int elapsedMs);
+    void inject(const Job &job);
 };

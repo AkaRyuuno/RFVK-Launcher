@@ -207,6 +207,12 @@ Item {
             }
         }
 
+        // ── Автовход: FG-пароль и персонаж ──
+        AutoLoginCard {
+            width: parent.width
+            acc: panel.acc
+        }
+
         // ── Главная кнопка (или «Повторить запуск» после ошибки) ──
         PrimaryButton {
             width: parent.width

@@ -88,60 +88,78 @@ bool HudInjector::dllAvailable()
     return dllFound() && injectorFound();
 }
 
-void HudInjector::attach(qint64 pid, const QString &nick)
+QString HudInjector::autoLoginDllPath()
 {
-    if (pid <= 0)
-        return;
-    if (!dllAvailable()) // нет библиотеки или инжектора — шаг пропускаем молча
-        return;
-    emit log(QStringLiteral("HUD: жду окно клиента · ") + nick, 0);
-    waitForWindow(pid, nick, 0);
+    return QDir::toNativeSeparators(
+        QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("rfvk_autologin.dll")));
 }
 
-void HudInjector::waitForWindow(qint64 pid, const QString &nick, int elapsedMs)
+bool HudInjector::autoLoginAvailable()
+{
+    return injectorFound() && QFileInfo::exists(autoLoginDllPath());
+}
+
+void HudInjector::attach(qint64 pid, const QString &nick)
+{
+    if (!dllAvailable()) // нет библиотеки или инжектора — шаг пропускаем молча
+        return;
+    attachLibrary(pid, dllPath(), QStringLiteral("HUD"), nick);
+}
+
+void HudInjector::attachLibrary(qint64 pid, const QString &dll, const QString &tag, const QString &nick)
+{
+    if (pid <= 0 || !injectorFound() || !QFileInfo::exists(dll))
+        return;
+    emit log(tag + QStringLiteral(": жду окно клиента · ") + nick, 0);
+    waitForWindow(Job{pid, dll, tag, nick}, 0);
+}
+
+void HudInjector::waitForWindow(const Job &job, int elapsedMs)
 {
 #ifdef Q_OS_WIN
-    if (!processAlive(pid)) {
-        emit log(QStringLiteral("HUD: клиент закрылся до подключения · ") + nick, 2);
+    if (!processAlive(job.pid)) {
+        emit log(job.tag + QStringLiteral(": клиент закрылся до подключения · ") + job.nick, 2);
+        emit failed(job.pid, job.dll);
         return;
     }
-    if (hasVisibleWindow(pid)) {
-        inject(pid, nick);
+    if (hasVisibleWindow(job.pid)) {
+        inject(job);
         return;
     }
     if (elapsedMs >= kWindowTimeoutMs) {
-        emit log(QStringLiteral("HUD: окно клиента не появилось за минуту · ") + nick, 2);
+        emit log(job.tag + QStringLiteral(": окно клиента не появилось за минуту · ") + job.nick, 2);
+        emit failed(job.pid, job.dll);
         return;
     }
-    QTimer::singleShot(kPollMs, this, [this, pid, nick, elapsedMs] {
-        waitForWindow(pid, nick, elapsedMs + kPollMs);
-    });
+    QTimer::singleShot(kPollMs, this, [this, job, elapsedMs] { waitForWindow(job, elapsedMs + kPollMs); });
 #else
-    Q_UNUSED(pid) Q_UNUSED(nick) Q_UNUSED(elapsedMs)
+    Q_UNUSED(elapsedMs)
+    emit failed(job.pid, job.dll);
 #endif
 }
 
-void HudInjector::inject(qint64 pid, const QString &nick)
+void HudInjector::inject(const Job &job)
 {
     auto *proc = new QProcess(this);
     proc->setProgram(injectorPath());
-    proc->setArguments({QString::number(pid), dllPath()});
+    proc->setArguments({QString::number(job.pid), job.dll});
     proc->setProcessChannelMode(QProcess::MergedChannels);
 
-    connect(proc, &QProcess::finished, this,
-            [this, proc, nick](int code, QProcess::ExitStatus) {
-                const QString out = QString::fromUtf8(proc->readAll()).trimmed();
-                const QString line = out.isEmpty() ? QStringLiteral("rfvk_inject завершился с кодом %1").arg(code) : out;
-                emit log(QStringLiteral("HUD · ") + nick + QStringLiteral(": ") + line,
-                         code == 0 ? 1 : 2);
-                proc->deleteLater();
-            });
+    connect(proc, &QProcess::finished, this, [this, proc, job](int code, QProcess::ExitStatus) {
+        const QString out = QString::fromUtf8(proc->readAll()).trimmed();
+        const QString line = out.isEmpty() ? QStringLiteral("rfvk_inject завершился с кодом %1").arg(code) : out;
+        emit log(job.tag + QStringLiteral(" · ") + job.nick + QStringLiteral(": ") + line, code == 0 ? 1 : 2);
+        if (code != 0)
+            emit failed(job.pid, job.dll);
+        proc->deleteLater();
+    });
     // Только «не запустился»: при падении/таймауте следом придёт finished,
     // и он сам напишет итог — иначе в журнале была бы двойная строка.
-    connect(proc, &QProcess::errorOccurred, this, [this, proc, nick](QProcess::ProcessError e) {
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, job](QProcess::ProcessError e) {
         if (e != QProcess::FailedToStart)
             return;
-        emit log(QStringLiteral("HUD: не удалось запустить rfvk_inject · ") + nick, 2);
+        emit log(job.tag + QStringLiteral(": не удалось запустить rfvk_inject · ") + job.nick, 2);
+        emit failed(job.pid, job.dll);
         proc->deleteLater();
     });
     proc->start();
