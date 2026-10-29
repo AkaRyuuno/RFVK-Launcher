@@ -1,2 +1,36 @@
-// Иконка исполняемого файла (Проводник, ярлыки). Окну иконку ставит main.cpp.
+// Ресурсы exe: иконка (Проводник, ярлыки; окну иконку ставит main.cpp) и
+// версия для «Свойства → Подробно». RFVK_VER_* передаёт CMake из PROJECT_VERSION.
+#include <winver.h>
+
 IDI_ICON1 ICON "app.ico"
+
+#define RFVK_STR2(x) #x
+#define RFVK_STR(x) RFVK_STR2(x)
+#define RFVK_VER_STR RFVK_STR(RFVK_VER_MAJOR) "." RFVK_STR(RFVK_VER_MINOR) "." RFVK_STR(RFVK_VER_PATCH)
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     RFVK_VER_MAJOR, RFVK_VER_MINOR, RFVK_VER_PATCH, 0
+PRODUCTVERSION  RFVK_VER_MAJOR, RFVK_VER_MINOR, RFVK_VER_PATCH, 0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041904B0"
+        BEGIN
+            VALUE "FileDescription",  "RFVK Launcher"
+            VALUE "FileVersion",      RFVK_VER_STR
+            VALUE "InternalName",     "RFVKLauncher"
+            VALUE "OriginalFilename", "RFVKLauncher.exe"
+            VALUE "ProductName",      "RFVK Launcher"
+            VALUE "ProductVersion",   RFVK_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0419, 1200
+    END
+END

@@ -79,6 +79,22 @@ cmake --build out\build\release
 cmake --install out\build\release --prefix out\dist
 ```
 
+### Релиз через GitHub Actions
+
+`.github/workflows/release.yml` на каждый тег вида `X.Y.Z` собирает то же самое на
+`windows-2025` (Qt 6.11.2 msvc2022_64, MSVC 2022) и публикует GitHub Release с
+архивом `RFVKLauncher-<тег>-win64.zip` и его SHA-256:
+
+```bat
+git tag 0.2.0
+git push origin 0.2.0
+```
+
+Версия программы берётся из тега (`-DRFVK_VERSION=0.2.0`). Тег с суффиксом
+(`0.2.0-beta1`) публикуется как pre-release. Ручной запуск (Actions → Release →
+Run workflow) только собирает архив и прикладывает его к запуску, без релиза.
+`seirin.dll` в архив не входит.
+
 ## Структура
 
 ```

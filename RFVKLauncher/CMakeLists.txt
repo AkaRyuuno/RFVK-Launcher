@@ -76,8 +76,11 @@ target_link_libraries(RFVKLauncher PRIVATE
 )
 if(WIN32)
     target_link_libraries(RFVKLauncher PRIVATE crypt32 bcrypt)
-    # Иконка .exe — эмблема-октагон из верхней полосы (resources/app.ico).
+    # Иконка .exe — эмблема-октагон из верхней полосы (resources/app.ico) —
+    # и версия в свойствах файла (числа из PROJECT_VERSION).
     target_sources(RFVKLauncher PRIVATE resources/app.rc)
+    set_source_files_properties(resources/app.rc PROPERTIES COMPILE_DEFINITIONS
+        "RFVK_VER_MAJOR=${PROJECT_VERSION_MAJOR};RFVK_VER_MINOR=${PROJECT_VERSION_MINOR};RFVK_VER_PATCH=${PROJECT_VERSION_PATCH}")
 endif()
 
 # ── 32-битная rfvk_autologin.dll (автовход внутри клиента) ───────────────────

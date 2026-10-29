@@ -130,6 +130,10 @@ signals:
     // Короткое уведомление-тост: текст, вид (0 инфо, 1 успех, 2 ошибка).
     void toast(const QString &text, int kind);
 
+public:
+    // Первая строка журнала: версия лаунчера и Qt (звать после загрузки QML).
+    void logStartup();
+
 private:
     enum class OpKind { Import, Launch, Refresh, Delete };
     struct Op { OpKind kind; QString id; };

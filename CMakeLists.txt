@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(RFVKLauncher VERSION 0.1.0 LANGUAGES CXX)
+# Версия: по умолчанию отсюда, сборка релиза в CI передаёт её из тега
+# (1.2.3 → -DRFVK_VERSION=1.2.3).
+set(RFVK_VERSION "0.1.0" CACHE STRING "Версия лаунчера (X.Y.Z)")
+project(RFVKLauncher VERSION ${RFVK_VERSION} LANGUAGES CXX)
 
 # Лаунчер — x64 (готовый Qt 6 для MSVC есть только 64-битный). 32-битная
 # часть (rfvk_autologin.dll) собирается отдельно — см. RFVKLauncher/CMakeLists.txt.

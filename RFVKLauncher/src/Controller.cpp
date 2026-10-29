@@ -1,6 +1,7 @@
 #include "Controller.h"
 #include "AutoLoginSession.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QProcess>
@@ -602,6 +603,13 @@ void Controller::recomputeGameStatus()
     m_gameCenterFound = !local.isEmpty() && QFileInfo::exists(QDir(local).filePath(QStringLiteral("GameCenter")));
     if (qEnvironmentVariableIsSet("RFVK_NOGC")) // для скриншота состояния «GameCenter не найден»
         m_gameCenterFound = false;
+}
+
+void Controller::logStartup()
+{
+    appendLog(QStringLiteral("RFVK Launcher %1 · Qt %2")
+                  .arg(QCoreApplication::applicationVersion(), QString::fromLatin1(qVersion())),
+              0);
 }
 
 void Controller::appendLog(const QString &text, int level)

@@ -21,6 +21,7 @@ QtObject {
     // Несколько выделенных аккаунтов.
     readonly property string multiHint: "Действия — для всех выделенных"
     readonly property string sidebarMultiHint: "Ctrl / Shift + клик — выбрать несколько"
+    function versionLabel(v) { return "RFVK Launcher " + v }
     readonly property string removeFromSelection: "Убрать из выделения"
     function selectedTitle(n) { return "Выбрано: " + accountsN(n) }
     function launchN(n) { return "Запустить RF Online · " + n }

@@ -53,7 +53,7 @@ Rectangle {
         ListView {
             id: list
             width: parent.width
-            height: parent.height - 56 - (hint.visible ? hint.height : 0)
+            height: parent.height - 56 - (hint.visible ? hint.height : 0) - footer.height
             clip: true
             spacing: Theme.s4
             topMargin: Theme.s12
@@ -125,6 +125,22 @@ Rectangle {
                 anchors.right: parent.right; anchors.rightMargin: Theme.s16
                 anchors.verticalCenter: parent.verticalCenter
                 text: Strings.sidebarMultiHint
+                role: "caption"; color: Theme.muted
+                elide: Text.ElideRight
+            }
+        }
+
+        // Подвал: версия лаунчера (из CMake, в релизе — из тега).
+        Item {
+            id: footer
+            width: parent.width
+            height: 28
+            Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: Theme.border }
+            AppText {
+                anchors.left: parent.left; anchors.leftMargin: Theme.s20
+                anchors.right: parent.right; anchors.rightMargin: Theme.s16
+                anchors.verticalCenter: parent.verticalCenter
+                text: Strings.versionLabel(Qt.application.version)
                 role: "caption"; color: Theme.muted
                 elide: Text.ElideRight
             }
