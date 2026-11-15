@@ -1,4 +1,4 @@
-# Сборка релиза: на тег X.Y.Z собирает лаунчер (x64) и rfvk_autologin.dll (x86),
+# Сборка релиза: на тег X.Y.Z собирает лаунчер (x64), rfvk_autologin.dll и rfvk_proxy.dll (x86),
 # упаковывает поставку в zip и публикует GitHub Release с этим архивом.
 #
 #   git tag 0.2.0 && git push origin 0.2.0
@@ -90,7 +90,7 @@ jobs:
         run: |
           $dist = "${{ steps.ver.outputs.archive }}"
           cmake --install build --prefix $dist
-          foreach ($f in 'RFVKLauncher.exe', 'rfvk_autologin.dll') {
+          foreach ($f in 'RFVKLauncher.exe', 'rfvk_autologin.dll', 'rfvk_proxy.dll') {
             if (-not (Test-Path "$dist/$f")) { throw "В поставке нет $f" }
           }
           Compress-Archive -Path "$dist/*" -DestinationPath "$dist.zip"

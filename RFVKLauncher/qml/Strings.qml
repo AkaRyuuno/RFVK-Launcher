@@ -151,4 +151,40 @@ QtObject {
         default: return kind
         }
     }
+
+    // ── Вкладки навигации и слоты маршрутизации (Прокси) ──
+    readonly property string tabAccounts: "Аккаунты"
+    readonly property string tabProxies: "Прокси и слоты"
+    readonly property string proxiesTitle: "Слоты маршрутизации"
+    readonly property string proxiesSubtitle: "До 5 клиентов игры на каждый слот (прямой IP или прокси). При закрытии окна слот освобождается автоматически."
+    readonly property string addProxy: "Добавить прокси"
+    readonly property string editProxy: "Настройки прокси"
+    readonly property string proxyDirect: "Прямое подключение"
+    readonly property string proxyDirectDesc: "Локальный IP сетевого адаптера компьютера"
+    function proxyActiveWindows(n) { return "Окон в игре: " + n }
+    function proxyAvailableSlots(n) { return "Свободных слотов: " + n }
+    readonly property string proxyDllHookReady: "Хук сокетов активен (rfvk_proxy.dll)"
+    readonly property string proxyDllHookMissing: "rfvk_proxy.dll не найдена — запуск через прокси будет недоступен"
+    readonly property string proxyName: "Название"
+    readonly property string proxyType: "Протокол"
+    readonly property string proxyHost: "Хост или IP"
+    readonly property string proxyPort: "Порт"
+    readonly property string proxyAuth: "Авторизация"
+    readonly property string proxyAuthDesc: "Требуется логин и пароль"
+    readonly property string proxyUser: "Логин"
+    readonly property string proxyPass: "Пароль"
+    readonly property string proxyTest: "Проверить"
+    readonly property string proxyTesting: "Проверка..."
+    readonly property string proxySave: "Сохранить"
+    readonly property string proxyAdd: "Добавить слот"
+    readonly property string proxyDelete: "Удалить"
+    readonly property string proxyDeleteConfirmTitle: "Удалить прокси?"
+    readonly property string proxyDeleteConfirmBody: "Прокси будет удалён из лаунчера. Аккаунты с этим слотом переключатся на авто-выбор."
+    readonly property string proxyActiveClientsNote: "Нельзя удалить слот с запущенными клиентами игры"
+    readonly property string slotSelectorLabel: "Слот маршрутизации"
+    readonly property string slotAuto: "Авто (прямой IP или свободный прокси)"
+    readonly property string slotDirect: "Прямой IP"
+    readonly property string slotFull: "заполнен (5/5)"
+    function slotCapacityText(cur, max) { return cur + "/" + max + " окон" }
+
 }
