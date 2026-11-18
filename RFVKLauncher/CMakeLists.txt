@@ -91,8 +91,6 @@ if(WIN32)
         "RFVK_VER_MAJOR=${PROJECT_VERSION_MAJOR};RFVK_VER_MINOR=${PROJECT_VERSION_MINOR};RFVK_VER_PATCH=${PROJECT_VERSION_PATCH}")
 endif()
 
-
-
 # ── 32-битная rfvk_autologin.dll (автовход внутри клиента) ───────────────────
 # Клиент RF_Online.exe 32-битный, и библиотека, которая в нём работает, тоже
 # должна быть x86. В одном дереве MSVC x64 и x86 не смешать, поэтому DLL —
@@ -143,6 +141,7 @@ if(WIN32 AND RFVK_AUTOLOGIN)
     if(RFVK_X86_VS_INSTANCE)
         list(APPEND _rfvk_x86_args "-DCMAKE_GENERATOR_INSTANCE=${RFVK_X86_VS_INSTANCE}")
     endif()
+    # Окружение консоли x64 (Platform=x64 и т. п.) сбило бы проект Win32 — убираем.
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env --unset=Platform --unset=VSCMD_ARG_TGT_ARCH
                 "${CMAKE_COMMAND}" ${_rfvk_x86_args}
@@ -158,6 +157,8 @@ if(WIN32 AND RFVK_AUTOLOGIN)
     endif()
 
     set(_rfvk_autologin_dll "${CMAKE_BINARY_DIR}/rfvk_autologin.dll")
+    # Всегда Release (/O2, /MT): отладочная DLL в клиенте не нужна. MSBuild сам
+    # решает, что пересобрать; без изменений шаг занимает пару секунд.
     add_custom_target(rfvk_autologin ALL
         COMMAND "${CMAKE_COMMAND}" -E env --unset=Platform --unset=VSCMD_ARG_TGT_ARCH
                 "${CMAKE_COMMAND}" --build "${_rfvk_x86_dir}" --config Release
@@ -173,6 +174,8 @@ else()
     set(_rfvk_autologin_summary "нет (RFVK_AUTOLOGIN=OFF) — автовход в лаунчере будет недоступен")
 endif()
 
+# ── 32-битная rfvk_proxy.dll (прокси для клиента) ────────────────────────────
+# Так же, как rfvk_autologin.dll: отдельный проект Win32, всегда Release.
 if(WIN32 AND RFVK_PROXY)
     set(_rfvk_proxy_dir "${CMAKE_BINARY_DIR}/proxy-x86")
     set(_rfvk_proxy_args

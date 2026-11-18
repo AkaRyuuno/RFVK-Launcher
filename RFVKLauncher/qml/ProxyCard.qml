@@ -263,15 +263,18 @@ Rectangle {
                 Layout.preferredWidth: 160
                 spacing: 4
 
-                Row {
+                // Подпись слева, счётчик справа.
+                Item {
                     width: parent.width
+                    height: loadLabel.implicitHeight
                     AppText {
+                        id: loadLabel
                         text: Strings.slotLoad
                         role: "caption"
                         color: Theme.muted
                     }
-                    Item { Layout.fillWidth: true; width: 1 }
                     AppText {
+                        anchors.right: parent.right
                         text: Strings.slotCapacityText(model.activeClients, model.maxClients)
                         role: "caption"
                         font.weight: Font.DemiBold

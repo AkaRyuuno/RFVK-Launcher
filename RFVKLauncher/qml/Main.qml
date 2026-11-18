@@ -8,6 +8,7 @@ import Rfvk
 Window {
     id: win
     width: 960
+    // Журналу — ~200 px под панелью аккаунта; на низких экранах не выше рабочей области.
     height: Math.min(760, Screen.desktopAvailableHeight - 40)
     minimumWidth: 720
     minimumHeight: 640
