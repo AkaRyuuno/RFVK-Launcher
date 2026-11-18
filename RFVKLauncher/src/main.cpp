@@ -27,6 +27,10 @@ static void loadFonts()
 
 int main(int argc, char *argv[])
 {
+    // Сглаживание Qt Quick без цветной бахромы на контрастном тексте.
+    if (!qEnvironmentVariableIsSet("QSG_DISTANCEFIELD_ANTIALIASING"))
+        qputenv("QSG_DISTANCEFIELD_ANTIALIASING", "gray");
+
     QGuiApplication app(argc, argv);
     QGuiApplication::setOrganizationName(QStringLiteral("RFVK"));
     QGuiApplication::setApplicationName(QStringLiteral("RFVKLauncher"));

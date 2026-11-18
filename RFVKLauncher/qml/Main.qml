@@ -8,8 +8,7 @@ import Rfvk
 Window {
     id: win
     width: 960
-    // Журналу — ~200 px под панелью аккаунта; на низких экранах не выше рабочей области.
-    height: Math.min(760, Screen.desktopAvailableHeight - 40)
+    height: Math.min(860, Screen.desktopAvailableHeight - 40)
     minimumWidth: 720
     minimumHeight: 640
     visible: true
@@ -31,10 +30,9 @@ Window {
     // Выделить все аккаунты: Ctrl+A.
     Shortcut {
         sequence: StandardKey.SelectAll
-        onActivated: {
-            if (win.activeTab === "accounts")
-                App.selectAll()
-        }
+        enabled: win.activeTab === "accounts" && !logConsole.textHasFocus
+                 && !(win.activeFocusItem instanceof AppField)
+        onActivated: App.selectAll()
     }
     // Быстрое переключение вкладок: Ctrl+1 (Аккаунты), Ctrl+2 (Прокси)
     Shortcut {
@@ -59,6 +57,7 @@ Window {
 
             // Левая часть: логотип + название + пилюля бренда
             Row {
+                id: brandRow
                 anchors.left: parent.left
                 anchors.leftMargin: Theme.s20
                 anchors.verticalCenter: parent.verticalCenter
@@ -72,11 +71,14 @@ Window {
                     Icon { anchors.centerIn: parent; name: "octagon"; color: Theme.surface; size: 15 }
                     Rectangle { anchors.centerIn: parent; width: 6; height: 6; radius: 3; color: Theme.accent }
                 }
-                AppText { anchors.verticalCenter: parent.verticalCenter; text: Strings.appTitle; role: "h3" }
+                AppText { id: titleText; anchors.verticalCenter: parent.verticalCenter; text: Strings.appTitle; role: "h3" }
 
                 // Пилюля бренда
                 Rectangle {
+                    id: brandPill
                     anchors.verticalCenter: parent.verticalCenter
+                    visible: tabs.x >= brandRow.x + 26 + titleText.implicitWidth + width
+                             + 2 * brandRow.spacing + Theme.s12
                     height: 24; width: bp.implicitWidth + 2 * Theme.s12; radius: Theme.rBadge
                     color: Theme.raised; border.width: 1; border.color: Theme.border
                     AppText { id: bp; anchors.centerIn: parent; text: Strings.brandPill; role: "caption"; color: Theme.muted }
@@ -85,9 +87,10 @@ Window {
 
             // Центр: Сегментированный переключатель вкладок («Аккаунты» / «Прокси и слоты»)
             Rectangle {
+                id: tabs
                 anchors.centerIn: parent
-                height: 32
-                width: tabRow.implicitWidth + 8
+                height: tabRow.implicitHeight + 2 * Theme.s4
+                width: tabRow.implicitWidth + 2 * Theme.s4
                 radius: Theme.rField
                 color: Theme.raised
                 border.width: 1
@@ -96,32 +99,32 @@ Window {
                 Row {
                     id: tabRow
                     anchors.centerIn: parent
-                    spacing: 4
+                    spacing: Theme.s4
 
                     // Вкладка «Аккаунты»
                     Rectangle {
-                        height: 26
-                        width: tabAccText.implicitWidth + 24
+                        height: 30
+                        width: accountTabContent.implicitWidth + 2 * Theme.s12
                         radius: Theme.rBadge
                         color: win.activeTab === "accounts" ? Theme.surface : "transparent"
                         border.width: win.activeTab === "accounts" ? 1 : 0
                         border.color: Theme.border
 
                         Row {
+                            id: accountTabContent
                             anchors.centerIn: parent
-                            spacing: 6
+                            spacing: Theme.s8
                             Icon {
                                 anchors.verticalCenter: parent.verticalCenter
                                 name: "userplus"
                                 size: 14
                                 color: win.activeTab === "accounts" ? Theme.accent : Theme.muted
                             }
-                            AppText {
-                                id: tabAccText
+                            ButtonLabel {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: Strings.tabAccounts
-                                role: "caption"
-                                font.weight: win.activeTab === "accounts" ? Font.DemiBold : Font.Normal
+                                role: "small"
+                                font.weight: Font.DemiBold
                                 color: win.activeTab === "accounts" ? Theme.text : Theme.muted
                             }
                         }
@@ -132,33 +135,32 @@ Window {
 
                     // Вкладка «Прокси и слоты»
                     Rectangle {
-                        height: 26
-                        width: tabProxText.implicitWidth + (ProxyManager.totalActiveClients > 0 ? cntBadge.width + 30 : 24)
+                        height: 30
+                        width: proxyTabContent.implicitWidth + 2 * Theme.s12
                         radius: Theme.rBadge
                         color: win.activeTab === "proxies" ? Theme.surface : "transparent"
                         border.width: win.activeTab === "proxies" ? 1 : 0
                         border.color: Theme.border
 
                         Row {
+                            id: proxyTabContent
                             anchors.centerIn: parent
-                            spacing: 6
+                            spacing: Theme.s8
                             Icon {
                                 anchors.verticalCenter: parent.verticalCenter
                                 name: "globe"
                                 size: 14
                                 color: win.activeTab === "proxies" ? Theme.accent : Theme.muted
                             }
-                            AppText {
-                                id: tabProxText
+                            ButtonLabel {
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: Strings.tabProxies
-                                role: "caption"
-                                font.weight: win.activeTab === "proxies" ? Font.DemiBold : Font.Normal
+                                role: "small"
+                                font.weight: Font.DemiBold
                                 color: win.activeTab === "proxies" ? Theme.text : Theme.muted
                             }
                             // Живой бейдж запущенных клиентов RF Online
                             Rectangle {
-                                id: cntBadge
                                 anchors.verticalCenter: parent.verticalCenter
                                 visible: ProxyManager.totalActiveClients > 0
                                 height: 16
@@ -167,7 +169,7 @@ Window {
                                 color: Theme.badgeFill(Theme.ok)
                                 border.width: 1
                                 border.color: Qt.rgba(Theme.ok.r, Theme.ok.g, Theme.ok.b, 0.4)
-                                AppText {
+                                ButtonLabel {
                                     id: cntText
                                     anchors.centerIn: parent
                                     text: ProxyManager.totalActiveClients
@@ -203,68 +205,73 @@ Window {
             }
         }
 
-        // ── Основное содержимое: Вкладки StackLayout ──
-        StackLayout {
+        // ── Рабочая область и общий журнал ──
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: win.activeTab === "proxies" ? 1 : 0
+            spacing: 0
 
-            // ── Вкладка 0: Аккаунты (Сайдбар + Панель выбранного аккаунта + Каталог игры + Журнал) ──
-            RowLayout {
-                spacing: 0
-
-                Sidebar {
-                    id: sidebar
-                    Layout.fillHeight: true
-                    Layout.preferredWidth: win.compact ? 248 : Theme.sidebarW
-                    compact: win.compact
-                    onAddRequested: addDlg.open()
-                }
-
-                // Правая зона аккаунтов
-                Item {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: Theme.s24
-                        anchors.rightMargin: Theme.s24
-                        anchors.topMargin: Theme.s20
-                        anchors.bottomMargin: Theme.s20
-                        spacing: Theme.s16
-
-                        // Панель аккаунта, сводка по нескольким выделенным или пустое состояние
-                        Loader {
-                            Layout.fillWidth: true
-                            sourceComponent: !win.hasSelection ? emptyComp
-                                           : App.selectedCount > 1 ? multiComp : panelComp
-                        }
-
-                        GameDirRow { Layout.fillWidth: true }
-
-                        LogConsole {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            Layout.minimumHeight: 120
-                        }
-                    }
-                }
+            Sidebar {
+                visible: win.activeTab === "accounts"
+                Layout.fillHeight: true
+                Layout.preferredWidth: win.compact ? 248 : Theme.sidebarW
+                compact: win.compact
+                onAddRequested: addDlg.open()
             }
 
-            // ── Вкладка 1: Прокси и слоты маршрутизации ──
-            Item {
-                ColumnLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: Theme.s24
-                    anchors.rightMargin: Theme.s24
-                    anchors.topMargin: Theme.s20
-                    anchors.bottomMargin: Theme.s20
-                    spacing: Theme.s16
+            SplitView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.leftMargin: Theme.s24
+                Layout.rightMargin: Theme.s24
+                Layout.topMargin: Theme.s20
+                Layout.bottomMargin: Theme.s20
+                orientation: Qt.Vertical
 
+                handle: Item {
+                    implicitHeight: Theme.s12
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: Theme.s32
+                        height: 3
+                        radius: 1.5
+                        color: parent.SplitHandle.pressed ? Theme.accent
+                             : parent.SplitHandle.hovered ? Theme.muted : Theme.borderStrong
+                    }
+                    HoverHandler { cursorShape: Qt.SizeVerCursor }
+                }
+
+                StackLayout {
+                    SplitView.fillHeight: true
+                    SplitView.minimumHeight: 220
+                    currentIndex: win.activeTab === "proxies" ? 1 : 0
+
+                    Flickable {
+                        id: accountView
+                        clip: true
+                        contentWidth: width
+                        contentHeight: accountContent.height
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                        ColumnLayout {
+                            id: accountContent
+                            width: accountView.width
+                            spacing: Theme.s16
+
+                            Loader {
+                                Layout.fillWidth: true
+                                sourceComponent: !win.hasSelection ? emptyComp
+                                               : App.selectedCount > 1 ? multiComp : panelComp
+                            }
+
+                            GameDirRow { Layout.fillWidth: true }
+                        }
+                    }
+
+                    // Прокси и слоты маршрутизации.
                     ProxyPanel {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
                         onAddRequested: addProxyDlg.openAdd()
                         onEditRequested: (slot) => addProxyDlg.openEdit(slot)
                         onDeleteRequested: (slotId, slotName) => {
@@ -282,12 +289,12 @@ Window {
                             delProxyConfirmDlg.open()
                         }
                     }
+                }
 
-                    LogConsole {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 140
-                        Layout.minimumHeight: 100
-                    }
+                LogConsole {
+                    id: logConsole
+                    SplitView.preferredHeight: 200
+                    SplitView.minimumHeight: 120
                 }
             }
         }

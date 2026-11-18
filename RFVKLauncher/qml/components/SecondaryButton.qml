@@ -64,7 +64,7 @@ AbstractButton {
                 color: control.enabled ? control.baseText : Theme.muted
                 size: 16
             }
-            AppText {
+            ButtonLabel {
                 anchors.verticalCenter: parent.verticalCenter
                 visible: control.text.length > 0
                 text: control.text

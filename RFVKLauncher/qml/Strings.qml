@@ -60,6 +60,15 @@ QtObject {
     readonly property string logEmpty: "Здесь появятся шаги запуска: обновление сессии, код запуска, старт игры."
     readonly property string clear: "Очистить"
 
+    // Контекстное меню полей и журнала.
+    readonly property string textUndo: "Отменить"
+    readonly property string textRedo: "Повторить"
+    readonly property string textCut: "Вырезать"
+    readonly property string textCopy: "Копировать"
+    readonly property string textPaste: "Вставить"
+    readonly property string textDelete: "Удалить"
+    readonly property string textSelectAll: "Выделить всё"
+
     // Нижняя строка состояния.
     readonly property string ready: "Готово"
     readonly property string working: "Выполняется:"
