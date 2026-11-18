@@ -1,4 +1,5 @@
 #include "VkPlayAuthBackend.h"
+#include "AccountFile.h"
 #include "VkChromeCookies.h"
 #include "VkCrypto.h"
 
@@ -13,8 +14,8 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QStandardPaths>
-#include <QUrlQuery>
 
 // ─────────────────────────── константы протокола ───────────────────────────
 namespace {
@@ -28,6 +29,27 @@ const QByteArray GEM_UA = QByteArrayLiteral("Downloader/19160"); // иной UA 
 const QString PROJECT_ID = QStringLiteral("2045077");            // RF Online
 const QString CHANNEL_ID = QStringLiteral("58");
 const QString API_URL = QStringLiteral("https://api.vkplay.ru");
+const QString sessionSourceKey = QStringLiteral("sessionSource");
+const QString fileSession = QStringLiteral("file");
+const QString gameCenterSession = QStringLiteral("gamecenter");
+
+QString refreshFailure(const QJsonObject &response, int status)
+{
+    if (status == 0)
+        return QStringLiteral("Не удалось подключиться к серверу авторизации VK Play");
+
+    const QString code = response.value(QStringLiteral("error")).toString();
+    static const QStringList oauthErrors{
+        QStringLiteral("invalid_grant"), QStringLiteral("invalid_token"),
+        QStringLiteral("invalid_refresh_token"), QStringLiteral("invalid_client"),
+        QStringLiteral("invalid_request"), QStringLiteral("unauthorized_client"),
+        QStringLiteral("unsupported_grant_type"), QStringLiteral("temporarily_unavailable"),
+        QStringLiteral("server_error")
+    };
+    if (oauthErrors.contains(code))
+        return QStringLiteral("VK Play не обновил сессию (HTTP %1, %2)").arg(status).arg(code);
+    return QStringLiteral("VK Play не выдал токен для входа (HTTP %1)").arg(status);
+}
 
 QString inferLoginKind(const QString &login)
 {
@@ -41,6 +63,27 @@ QString inferLoginKind(const QString &login)
                           || (digits.size() >= 10
                               && QRegularExpression(QStringLiteral("^[+()\\-0-9 ]+$")).match(login).hasMatch());
     return phoneish ? QStringLiteral("phone") : QStringLiteral("vkid");
+}
+
+Account accountProfile(const QJsonObject &object)
+{
+    Account account;
+    account.id = account.login = object.value(QStringLiteral("login")).toString();
+    account.loginKind = object.value(QStringLiteral("loginKind")).toString();
+    if (account.loginKind.isEmpty())
+        account.loginKind = inferLoginKind(account.login);
+    account.nick = object.value(QStringLiteral("nick")).toString();
+    account.uid = object.value(QStringLiteral("uid")).toString();
+    account.persId = object.value(QStringLiteral("persId")).toString();
+    return account;
+}
+
+QString decryptRefresh(const QJsonObject &object)
+{
+    const QString hex = object.value(QStringLiteral("refreshEnc")).toString();
+    if (hex.isEmpty())
+        return {};
+    return QString::fromLatin1(VkCrypto::dpapiUnprotect(QByteArray::fromHex(hex.toLatin1())));
 }
 } // namespace
 
@@ -62,17 +105,9 @@ public:
         QVector<Account> out;
         for (const QJsonValue &v : m_arr) {
             const QJsonObject o = v.toObject();
-            Account a;
-            a.login = o.value(QStringLiteral("login")).toString();
-            a.id = a.login;
-            a.loginKind = o.value(QStringLiteral("loginKind")).toString();
-            if (a.loginKind.isEmpty())
-                a.loginKind = inferLoginKind(a.login);
-            a.nick = o.value(QStringLiteral("nick")).toString();
-            a.uid = o.value(QStringLiteral("uid")).toString();
-            a.persId = o.value(QStringLiteral("persId")).toString();
+            Account a = accountProfile(o);
             const bool hasRefresh = !o.value(QStringLiteral("refreshEnc")).toString().isEmpty();
-            const qint64 exp = static_cast<qint64>(o.value(QStringLiteral("refreshExpires")).toDouble());
+            const qint64 exp = o.value(QStringLiteral("refreshExpires")).toInteger();
             if (!hasRefresh)
                 a.sessionState = Session::None;
             else if (exp && exp <= now)
@@ -117,27 +152,28 @@ public:
             m_arr[i] = o;
         else
             m_arr.append(o);
-        save();
+        save(m_arr);
     }
 
-    void remove(const QString &login)
+    bool remove(const QString &login)
     {
         const int i = indexOf(login);
-        if (i >= 0) {
-            m_arr.removeAt(i);
-            save();
-        }
+        if (i < 0)
+            return true;
+        QJsonArray next = m_arr;
+        next.removeAt(i);
+        if (!save(next))
+            return false;
+        m_arr = std::move(next);
+        return true;
     }
 
     QString getRefresh(const QString &login) const
     {
-        const QString hex = obj(login).value(QStringLiteral("refreshEnc")).toString();
-        if (hex.isEmpty())
-            return {};
-        return QString::fromLatin1(VkCrypto::dpapiUnprotect(QByteArray::fromHex(hex.toLatin1())));
+        return decryptRefresh(obj(login));
     }
 
-    void setRefresh(const QString &login, const QString &token, qint64 expiry)
+    void setRefresh(const QString &login, const QString &token, qint64 expiry, const QString &source = {})
     {
         QJsonObject f;
         f[QStringLiteral("refreshEnc")] =
@@ -145,6 +181,8 @@ public:
                             : QString::fromLatin1(VkCrypto::dpapiProtect(token.toLatin1()).toHex());
         if (expiry)
             f[QStringLiteral("refreshExpires")] = static_cast<double>(expiry);
+        if (!source.isEmpty())
+            f[sessionSourceKey] = source;
         setFields(login, f);
     }
 
@@ -161,6 +199,92 @@ public:
         return {};
     }
 
+    QString importAccounts(const QList<AccountFile::Entry> &entries, AccountFile::ImportResult &result)
+    {
+        QJsonArray next = m_arr;
+        QVector<Account> profiles = list();
+        for (const AccountFile::Entry &entry : entries) {
+            const Account &profile = entry.profile;
+            const int row = AccountFile::findProfile(profiles, profile);
+            const QJsonObject current = row >= 0 ? next.at(row).toObject() : QJsonObject{};
+            if (row >= 0) {
+                const QString &uid = profiles.at(row).uid;
+                const bool differentUid = !uid.isEmpty() && !profile.uid.isEmpty() && uid != profile.uid;
+                if (differentUid || entry.refreshToken.isEmpty()) {
+                    ++result.skipped;
+                    continue;
+                }
+                const qint64 expiry = current.value(QStringLiteral("refreshExpires")).toInteger();
+                if (current.value(sessionSourceKey) == fileSession && entry.refreshToken == decryptRefresh(current)
+                    && (entry.refreshExpires == 0 || entry.refreshExpires == expiry)) {
+                    ++result.skipped;
+                    continue;
+                }
+            }
+
+            QJsonObject record = current;
+            if (row < 0) {
+                record = {
+                    {QStringLiteral("login"), profile.login},
+                    {QStringLiteral("loginKind"), profile.loginKind.isEmpty() ? inferLoginKind(profile.login) : profile.loginKind},
+                    {QStringLiteral("nick"), profile.nick},
+                    {QStringLiteral("uid"), profile.uid},
+                    {QStringLiteral("persId"), profile.persId},
+                    {sessionSourceKey, fileSession}
+                };
+            }
+            if (!entry.refreshToken.isEmpty()) {
+                const QByteArray encrypted = VkCrypto::dpapiProtect(entry.refreshToken.toLatin1());
+                if (encrypted.isEmpty())
+                    return QStringLiteral("Не удалось защитить импортированную сессию средствами Windows");
+                record.insert(QStringLiteral("refreshEnc"), QString::fromLatin1(encrypted.toHex()));
+                record.insert(QStringLiteral("refreshExpires"), entry.refreshExpires);
+                record.insert(sessionSourceKey, fileSession);
+                if (row >= 0 && profiles.at(row).uid.isEmpty()) {
+                    profiles[row].uid = profile.uid;
+                    record.insert(QStringLiteral("uid"), profile.uid);
+                }
+                ++result.sessions;
+            }
+
+            if (row >= 0) {
+                next[row] = record;
+            } else {
+                next.append(record);
+                profiles.append(profile);
+                ++result.added;
+            }
+        }
+        if (result.added == 0 && result.sessions == 0)
+            return {};
+        if (!save(next))
+            return QStringLiteral("Не удалось сохранить импортированные аккаунты");
+        m_arr = std::move(next);
+        return {};
+    }
+
+    QString exportAccounts(const QString &path, const QStringList &ids, QString &summary) const
+    {
+        if (QFileInfo(path) == QFileInfo(m_path))
+            return QStringLiteral("Выберите отдельный файл для экспорта аккаунтов");
+
+        QList<AccountFile::Entry> entries;
+        for (const QString &id : ids) {
+            const QJsonObject record = obj(id);
+            if (record.isEmpty())
+                continue;
+            AccountFile::Entry entry;
+            entry.profile = accountProfile(record);
+            entry.refreshToken = decryptRefresh(record);
+            if (entry.refreshToken.isEmpty() && !record.value(QStringLiteral("refreshEnc")).toString().isEmpty())
+                return QStringLiteral("Не удалось прочитать сохранённую сессию для экспорта");
+            entry.refreshExpires = record.value(QStringLiteral("refreshExpires")).toInteger();
+            entries.append(std::move(entry));
+        }
+        summary = AccountFile::exportSummary(entries);
+        return AccountFile::write(path, entries);
+    }
+
 private:
     void load()
     {
@@ -168,12 +292,12 @@ private:
         if (f.open(QIODevice::ReadOnly))
             m_arr = QJsonDocument::fromJson(f.readAll()).array();
     }
-    void save()
+    bool save(const QJsonArray &accounts) const
     {
         QDir().mkpath(QFileInfo(m_path).absolutePath());
-        QFile f(m_path);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-            f.write(QJsonDocument(m_arr).toJson(QJsonDocument::Indented));
+        const QByteArray data = QJsonDocument(accounts).toJson();
+        QSaveFile f(m_path);
+        return f.open(QIODevice::WriteOnly) && f.write(data) == data.size() && f.commit();
     }
     QString m_path;
     QJsonArray m_arr;
@@ -198,7 +322,7 @@ public slots:
             login = m_store.findByUid(uid);
             if (login.isEmpty())
                 login = uid.isEmpty() ? QStringLiteral("account") : (QStringLiteral("uid-") + uid);
-            m_store.setRefresh(login, refresh, exp);
+            m_store.setRefresh(login, refresh, exp, gameCenterSession);
             QJsonObject f;
             f[QStringLiteral("nick")] = nick;
             f[QStringLiteral("uid")] = uid;
@@ -212,15 +336,43 @@ public slots:
         }
     }
 
+    void doImportAccounts(const QString &path)
+    {
+        emit busyChanged(true);
+        QList<AccountFile::Entry> entries;
+        QString error = AccountFile::read(path, entries);
+        AccountFile::ImportResult result;
+        if (error.isEmpty())
+            error = m_store.importAccounts(entries, result);
+        if (!error.isEmpty()) {
+            fail(error);
+            return;
+        }
+        if (result.added > 0 || result.sessions > 0)
+            emit accountsChanged(m_store.list());
+        finishFileOperation(result.summary());
+    }
+
+    void doExportAccounts(const QString &path, const QStringList &ids)
+    {
+        emit busyChanged(true);
+        QString summary;
+        const QString error = m_store.exportAccounts(path, ids, summary);
+        if (!error.isEmpty()) {
+            fail(error);
+            return;
+        }
+        finishFileOperation(summary);
+    }
+
     void doRefresh(const QString &login)
     {
         emit busyChanged(true);
         QString err;
         emit progress(QStringLiteral("Обновляю сессию · ") + displayName(login) + QStringLiteral("…"), 0);
-        QString at = refreshAccess(login, &err);
+        const QString at = refreshAccess(login, &err);
         if (at.isEmpty()) {
-            m_store.setFields(login, {{QStringLiteral("refreshEnc"), QString()}});
-            fail(err.isEmpty() ? QStringLiteral("Сессия отклонена. Нужен импорт из GameCenter") : err);
+            fail(err);
             return;
         }
         refreshProfile(login, at);
@@ -236,17 +388,22 @@ public slots:
         QString err;
         // 1) обновить сессию существующим refresh.
         emit progress(QStringLiteral("Обновляю сессию · ") + displayName(login) + QStringLiteral("…"), 0);
+        const QJsonObject stored = m_store.obj(login);
+        const QString source = stored.value(sessionSourceKey).toString();
+        const bool hasSavedToken = !stored.value(QStringLiteral("refreshEnc")).toString().isEmpty();
+        const bool allowGameCenter = source == gameCenterSession || (source.isEmpty() && !hasSavedToken);
         QString at = refreshAccess(login, &err);
-        // 2) фолбэк без пароля: взять сессию из GameCenter, если это тот же мастер.
-        if (at.isEmpty()) {
+        // 2) восстановить сессию аккаунта GameCenter, если это тот же мастер.
+        if (at.isEmpty() && allowGameCenter) {
+            emit progress(err, 2);
             emit progress(QStringLiteral("Беру сессию из GameCenter (без пароля)…"), 0);
             QString r2, nick2, uid2;
             qint64 exp2 = 0;
             QString e2;
             if (mintViaCookies(&r2, &exp2, &nick2, &uid2, &e2)) {
-                const QString curUid = m_store.obj(login).value(QStringLiteral("uid")).toString();
+                const QString curUid = stored.value(QStringLiteral("uid")).toString();
                 if (curUid.isEmpty() || curUid == uid2) {
-                    m_store.setRefresh(login, r2, exp2);
+                    m_store.setRefresh(login, r2, exp2, gameCenterSession);
                     at = refreshAccess(login, &err);
                 } else {
                     err = QStringLiteral("В GameCenter другой аккаунт (uid ") + uid2
@@ -257,7 +414,7 @@ public slots:
             }
         }
         if (at.isEmpty()) {
-            fail(err.isEmpty() ? QStringLiteral("Не удалось получить сессию") : err);
+            fail(err);
             return;
         }
         refreshProfile(login, at);
@@ -276,16 +433,19 @@ public slots:
         emit busyChanged(false);
     }
 
-    void doDelete(const QString &login)
+    void doDelete(const QString &login, bool revokeSession)
     {
         emit busyChanged(true);
         const QString name = displayName(login);
-        const QString refresh = m_store.getRefresh(login);
+        const QString refresh = revokeSession ? m_store.getRefresh(login) : QString();
+        if (!m_store.remove(login)) {
+            fail(QStringLiteral("Не удалось удалить аккаунт из лаунчера"));
+            return;
+        }
         if (!refresh.isEmpty()) {
             emit progress(QStringLiteral("Отзываю сессию в VK Play…"), 0);
             drop(refresh); // best-effort
         }
-        m_store.remove(login);
         emit progress(QStringLiteral("Аккаунт «") + name + QStringLiteral("» удалён из лаунчера"), 1);
         emit accountsChanged(m_store.list());
         emit finished(true, QStringLiteral("Аккаунт «") + name + QStringLiteral("» удалён"));
@@ -301,6 +461,13 @@ signals:
     void readyToLaunch(const QString &accountId, const QString &persId, const QString &code);
 
 private:
+    void finishFileOperation(const QString &summary)
+    {
+        emit progress(summary, 1);
+        emit finished(true, summary);
+        emit busyChanged(false);
+    }
+
     void fail(const QString &msg)
     {
         emit progress(msg, 2);
@@ -326,8 +493,10 @@ private:
     // Синхронный HTTP в рабочем потоке. post==nullptr -> GET.
     QByteArray http(QNetworkRequest req, const QByteArray *post, int *status, bool *ok)
     {
-        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
+        if (!req.attribute(QNetworkRequest::RedirectPolicyAttribute).isValid()) {
+            req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                             QNetworkRequest::NoLessSafeRedirectPolicy);
+        }
         QNetworkReply *reply = post ? nam()->post(req, *post) : nam()->get(req);
         QEventLoop loop;
         connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
@@ -354,23 +523,23 @@ private:
         const QString refresh = m_store.getRefresh(login);
         if (refresh.isEmpty()) {
             if (err)
-                *err = QStringLiteral("Нет сохранённой сессии — нужен импорт из GameCenter");
+                *err = QStringLiteral("Сохранённая сессия недоступна. Импортируйте актуальную сессию.");
             return {};
         }
         QNetworkRequest r{QUrl(TOKEN_URL)};
         r.setHeader(QNetworkRequest::ContentTypeHeader,
                     QStringLiteral("application/x-www-form-urlencoded"));
-        QUrlQuery form;
-        form.addQueryItem(QStringLiteral("client_id"), CLIENT_ID);
-        form.addQueryItem(QStringLiteral("grant_type"), QStringLiteral("refresh_token"));
-        form.addQueryItem(QStringLiteral("refresh_token"), refresh);
-        const QByteArray body = form.toString(QUrl::FullyEncoded).toUtf8();
+        r.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
+        r.setTransferTimeout(15000);
+        const QByteArray body = QByteArrayLiteral("client_id=") + QUrl::toPercentEncoding(CLIENT_ID)
+            + QByteArrayLiteral("&grant_type=refresh_token&refresh_token=") + QUrl::toPercentEncoding(refresh);
         int st = 0;
         bool ok = false;
         const QJsonObject j = QJsonDocument::fromJson(http(r, &body, &st, &ok)).object();
-        if (!j.contains(QStringLiteral("access_token"))) {
+        const QString access = j.value(QStringLiteral("access_token")).toString();
+        if (!ok || access.isEmpty()) {
             if (err)
-                *err = QStringLiteral("Сессия истекла (HTTP %1)").arg(st);
+                *err = refreshFailure(j, st);
             return {};
         }
         // Персист ротации, если сервер прислал новый refresh/срок.
@@ -381,7 +550,7 @@ private:
                                : 0;
         if ((!newRefresh.isEmpty() && newRefresh != refresh) || exp)
             m_store.setRefresh(login, newRefresh.isEmpty() ? refresh : newRefresh, exp);
-        return j.value(QStringLiteral("access_token")).toString();
+        return access;
     }
 
     QString gemHint(const QString &hint, const QString &xmlBody)
@@ -567,6 +736,20 @@ void VkPlayAuthBackend::importSession()
     QMetaObject::invokeMethod(m_worker, "doImport", Qt::QueuedConnection);
 }
 
+void VkPlayAuthBackend::importAccountsFromFile(const QString &path)
+{
+    QMetaObject::invokeMethod(m_worker, [worker = m_worker, path] {
+        worker->doImportAccounts(path);
+    }, Qt::QueuedConnection);
+}
+
+void VkPlayAuthBackend::exportAccountsToFile(const QString &path, const QStringList &ids)
+{
+    QMetaObject::invokeMethod(m_worker, [worker = m_worker, path, ids] {
+        worker->doExportAccounts(path, ids);
+    }, Qt::QueuedConnection);
+}
+
 void VkPlayAuthBackend::launch(const QString &accountId)
 {
     QMetaObject::invokeMethod(m_worker, "doLaunch", Qt::QueuedConnection, Q_ARG(QString, accountId));
@@ -577,9 +760,10 @@ void VkPlayAuthBackend::refreshSession(const QString &accountId)
     QMetaObject::invokeMethod(m_worker, "doRefresh", Qt::QueuedConnection, Q_ARG(QString, accountId));
 }
 
-void VkPlayAuthBackend::deleteAccount(const QString &accountId)
+void VkPlayAuthBackend::deleteAccount(const QString &accountId, bool revokeSession)
 {
-    QMetaObject::invokeMethod(m_worker, "doDelete", Qt::QueuedConnection, Q_ARG(QString, accountId));
+    QMetaObject::invokeMethod(m_worker, "doDelete", Qt::QueuedConnection,
+                              Q_ARG(QString, accountId), Q_ARG(bool, revokeSession));
 }
 
 #include "VkPlayAuthBackend.moc"

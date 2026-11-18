@@ -13,6 +13,7 @@ QtObject {
     readonly property string launch: "Запустить RF Online"
     readonly property string launchRetry: "Повторить запуск"
     readonly property string refresh: "Обновить сессию"
+    readonly property string exportAccounts: "Экспорт"
     readonly property string remove: "Удалить аккаунт"
     readonly property string addAccount: "Добавить аккаунт"
     readonly property string quickImport: "Импорт из GameCenter"
@@ -43,6 +44,11 @@ QtObject {
     // Добавление аккаунта.
     readonly property string importTitle: "Импорт сессии из GameCenter"
     readonly property string importButton: "Импортировать из GameCenter"
+    readonly property string importFile: "Импортировать из файла…"
+    readonly property string importFileTitle: "Выберите файл аккаунтов"
+    readonly property string importFileHint: "Файл переносит аккаунты и сохранённые сессии с другого ПК."
+    readonly property string exportFileTitle: "Сохраните файл аккаунтов и сессий"
+    readonly property string accountFileFilter: "Файлы аккаунтов (*.json)"
     readonly property string importHint: "Возьмём текущую сессию из установленного VK Play GameCenter — пароль не нужен. Чтобы добавить другой аккаунт, войдите под ним в GameCenter и повторите импорт."
     readonly property string loginPrefix: "Вход:"
 
@@ -129,6 +135,8 @@ QtObject {
     // Диалог удаления.
     readonly property string confirmDeleteTitle: "Удалить аккаунт?"
     readonly property string confirmDeleteYes: "Удалить"
+    readonly property string revokeDeletedSession: "Отозвать сессию в VK Play"
+    readonly property string revokeDeletedSessionHint: "Отзыв отключит экспортированные копии этой сессии."
     readonly property string cancel: "Отмена"
 
     // Заголовок статуса сессии (крупный, в панели).

@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QSettings>
 #include <QStringList>
+#include <QUrl>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -97,14 +98,17 @@ public slots:
     void toggleSelect(const QString &id);
     void selectRange(const QString &id);
     void selectAll();
+    void moveAccount(const QString &id, const QString &targetId, bool after);
 
     void importSession();
+    void importAccountsFromFile(const QUrl &file);
+    void exportAccountsToFile(const QUrl &file, const QStringList &ids);
     void launch(const QString &id);
     void launchSelected();
     void refresh(const QString &id);
     void refreshSelected();
-    void deleteAccount(const QString &id);
-    void deleteSelected();
+    void deleteAccount(const QString &id, bool revokeSession = false);
+    void deleteSelected(bool revokeSession = false);
     void setGameDir(const QString &dir);
     void setTheme(const QString &t);
     void setHudEnabled(bool on);
@@ -139,8 +143,15 @@ public:
     void logStartup();
 
 private:
-    enum class OpKind { Import, Launch, Refresh, Delete };
-    struct Op { OpKind kind; QString id; };
+    enum class OpKind { Import, Launch, Refresh, Delete, ImportFile, ExportFile };
+    struct Op {
+        OpKind kind;
+        QString id;
+        QString filePath;
+        QStringList exportIds;
+        bool revokeSession = false;
+        bool targetsAccount() const { return kind == OpKind::Launch || kind == OpKind::Refresh || kind == OpKind::Delete; }
+    };
 
     void connectBackend();
     void recomputeGameStatus();
@@ -152,7 +163,8 @@ private:
     void onCharactersFound(const QString &accountId, const QList<SavedCharacter> &list);
 
     // Очередь операций: enqueue -> pump подаёт бэкенду по одной -> opDone.
-    void enqueue(OpKind kind, const QStringList &ids);
+    void enqueue(OpKind kind, const QStringList &ids, bool revokeSession = false);
+    void enqueue(const QList<Op> &operations);
     void schedulePump();
     void pump();
     void opDone();
@@ -162,6 +174,8 @@ private:
 
     void setSelection(const QStringList &ids);
     QStringList inModelOrder(const QStringList &ids) const;
+    QVector<Account> orderedAccounts(QVector<Account> items) const;
+    void saveAccountOrder();
     void setError(const QString &id, const QString &msg);
     void clearError(const QString &id);
     QVariantMap accountMap(const Account &a) const;
@@ -170,6 +184,7 @@ private:
     IAuthBackend *m_backend = nullptr;
     HudInjector *m_hud = nullptr;
     QSettings m_settings;
+    QStringList m_accountOrder;
     QStringList m_selected;          // выделенные id в порядке списка
     QString m_anchor;                // последний кликнутый (для Shift-диапазона)
     QString m_gameDir;
@@ -185,7 +200,7 @@ private:
     QHash<QString, QString> m_errors; // id аккаунта -> текст последней ошибки
 
     QList<Op> m_queue;
-    Op m_current{OpKind::Import, {}};
+    Op m_current{OpKind::Import, {}, {}, {}};
     bool m_inFlight = false;
     bool m_pumpScheduled = false;
     bool m_backendBusy = false;

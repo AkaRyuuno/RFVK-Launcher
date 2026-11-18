@@ -3,7 +3,7 @@ import Rfvk
 
 // Простые векторные иконки (рисуются на Canvas, 24×24 сетка).
 // Доступные name: play, refresh, trash, folder, key, plus, check, warn, cross,
-// moon, sun, mail, phone, vk, download, sliders, userplus, lock, octagon, chevron,
+// moon, sun, mail, phone, vk, download, upload, sliders, userplus, lock, octagon, chevron,
 // globe, server, edit.
 Item {
     id: root
@@ -117,6 +117,11 @@ Item {
             case "download":
                 stroke(function() { ctx.moveTo(12, 4); ctx.lineTo(12, 15) })
                 stroke(function() { ctx.moveTo(7.5, 10.5); ctx.lineTo(12, 15); ctx.lineTo(16.5, 10.5) })
+                stroke(function() { ctx.moveTo(5, 19); ctx.lineTo(19, 19) })
+                break
+            case "upload":
+                stroke(function() { ctx.moveTo(12, 15); ctx.lineTo(12, 4) })
+                stroke(function() { ctx.moveTo(7.5, 8.5); ctx.lineTo(12, 4); ctx.lineTo(16.5, 8.5) })
                 stroke(function() { ctx.moveTo(5, 19); ctx.lineTo(19, 19) })
                 break
             case "sliders":

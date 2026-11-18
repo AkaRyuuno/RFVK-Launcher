@@ -2,6 +2,7 @@
 #include "Account.h"
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 // Абстрактный бэкенд авторизации. Все операции асинхронные: результат
@@ -21,12 +22,14 @@ public:
 
     // Импорт текущей сессии из установленного GameCenter (без пароля).
     virtual void importSession() = 0;
+    virtual void importAccountsFromFile(const QString &path) = 0;
+    virtual void exportAccountsToFile(const QString &path, const QStringList &ids) = 0;
     // Полный путь запуска: обновить сессию -> получить код -> старт игры.
     virtual void launch(const QString &accountId) = 0;
     // Обновить сессию (refresh_token -> новый access/refresh).
     virtual void refreshSession(const QString &accountId) = 0;
-    // Удалить аккаунт из лаунчера (с отзывом сессии на сервере, best-effort).
-    virtual void deleteAccount(const QString &accountId) = 0;
+    // Удалить аккаунт из лаунчера. По запросу также отозвать сессию в VK Play.
+    virtual void deleteAccount(const QString &accountId, bool revokeSession) = 0;
 
     // Текущий снимок списка аккаунтов (для первичного заполнения модели).
     virtual QVector<Account> accounts() const = 0;

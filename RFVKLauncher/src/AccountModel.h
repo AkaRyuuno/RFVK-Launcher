@@ -5,7 +5,7 @@
 
 // Модель списка аккаунтов для QML (ListView в сайдбаре).
 // Источник истины о сессиях — бэкенд; контроллер зеркалит его данные сюда
-// через reset()/upsert()/remove(), сохраняя выбранный аккаунт по id.
+// через reset(), сохраняя выбранный аккаунт по id.
 class AccountModel : public QAbstractListModel {
     Q_OBJECT
 public:
@@ -31,6 +31,7 @@ public:
 
     // Полная замена списка (приход accountsChanged от бэкенда).
     void reset(const QVector<Account> &items);
+    bool moveAccount(const QString &id, const QString &targetId, bool after);
     int indexOfId(const QString &id) const;
     Account at(int row) const;
     // Инициалы для аватара-заглушки: по двум словам ника или первые две буквы.
