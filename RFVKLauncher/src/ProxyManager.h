@@ -1,9 +1,14 @@
 #pragma once
 #include "ProxyModel.h"
+
+#include <QElapsedTimer>
 #include <QHash>
 #include <QObject>
 #include <QSettings>
 #include <QTimer>
+#include <QVariantList>
+
+#include <functional>
 #include <memory>
 
 namespace remote_load {
@@ -13,15 +18,24 @@ struct Result;
 
 // Менеджер слотов маршрутизации (прямое подключение + SOCKS5/HTTP прокси).
 //
-// Управляет списком прокси, их сохранением в QSettings, выделением слотов (до 5 окон
-// на каждый слот), динамическим отслеживанием закрытия процессов игры и освобождением
-// слотов, а также инжектом 32-битной rfvk_proxy.dll в клиентские процессы.
+// Хранит список прокси (пароли — через DPAPI), раздаёт слоты запускаемым
+// клиентам (не больше kMaxClientsPerSlot на слот), следит за завершением
+// клиентов по дескриптору процесса и подключает 32-битную rfvk_proxy.dll к
+// клиентам, запущенным через прокси.
+//
+// Подключение через прокси — по принципу «закрыто при сбое»: клиент считается
+// подтверждённым, только когда библиотека сообщила, что перехваты стоят и
+// прямых соединений до них не было. Не загрузилась, перехват не встал, клиент
+// успел соединиться напрямую или подтверждение не пришло за kConfirmTimeoutMs —
+// лаунчер закрывает клиент, чтобы тот не играл с реального IP.
 class ProxyManager : public QObject {
     Q_OBJECT
     Q_PROPERTY(ProxyModel *model READ model CONSTANT)
-    Q_PROPERTY(int totalActiveClients READ totalActiveClients NOTIFY totalClientsChanged)
-    Q_PROPERTY(int availableSlotsCount READ availableSlotsCount NOTIFY availableSlotsCountChanged)
+    Q_PROPERTY(int totalActiveClients READ totalActiveClients NOTIFY slotsChanged)
+    Q_PROPERTY(int availableSlotsCount READ availableSlotsCount NOTIFY slotsChanged)
     Q_PROPERTY(bool proxyDllAvailable READ proxyDllAvailable CONSTANT)
+    // Слоты для выпадающего списка: [{label, value}] без пункта «Авто» (его
+    // добавляет интерфейс).
     Q_PROPERTY(QVariantList slotOptions READ slotOptions NOTIFY slotsChanged)
 
 public:
@@ -29,7 +43,6 @@ public:
     ~ProxyManager() override;
 
     ProxyModel *model() { return &m_model; }
-    const ProxyModel *model() const { return &m_model; }
 
     int totalActiveClients() const;
     int availableSlotsCount() const;
@@ -38,71 +51,77 @@ public:
     static QString proxyDllPath();
     static bool proxyDllAvailable();
 
-    // Авто-распределение или получение слота с проверкой лимита (<= 5).
-    // Если preferredSlotId задан и свободен (< 5) — возвращает его.
-    // Если "auto" или пусто — берёт Слот 0 (Direct) если < 5, иначе первый свободный прокси.
-    // Если все слоты заполнены (5/5) — возвращает пустую строку.
-    Q_INVOKABLE QString allocateSlot(const QString &preferredSlotId = QString());
+    // Слот для нового клиента. preferredSlotId — слот из настроек аккаунта
+    // ("auto" или пусто — авто): берётся, если он есть, включён и не заполнен.
+    // Авто — прямой IP, пока в нём есть место, затем первый свободный прокси.
+    // Все заняты — пустая строка.
+    Q_INVOKABLE QString allocateSlot(const QString &preferredSlotId = QString()) const;
 
-    // Настройка привязки конкретного аккаунта к слоту (хранится в QSettings).
+    // Привязка аккаунта к слоту (в настройках; "auto" — авто-выбор).
     Q_INVOKABLE QString accountPreferredSlot(const QString &accountId) const;
     Q_INVOKABLE void setAccountPreferredSlot(const QString &accountId, const QString &slotId);
 
-    // Добавление, редактирование, удаление прокси
+    // type — ProxySlot::Type (1 — SOCKS5, 2 — HTTP). В updateProxy пустой
+    // pass оставляет сохранённый пароль; включённость меняет setProxyEnabled.
     Q_INVOKABLE QString addProxy(const QString &name, int type, const QString &host, int port,
-                                bool auth, const QString &user, const QString &pass);
-    Q_INVOKABLE void updateProxy(const QString &id, const QString &name, int type, const QString &host,
-                                int port, bool auth, const QString &user, const QString &pass, bool enabled);
+                                 bool auth, const QString &user, const QString &pass);
+    Q_INVOKABLE bool updateProxy(const QString &id, const QString &name, int type, const QString &host,
+                                 int port, bool auth, const QString &user, const QString &pass);
     Q_INVOKABLE void removeProxy(const QString &id);
     Q_INVOKABLE void setProxyEnabled(const QString &id, bool enabled);
 
-    // Тестирование прокси (измерение TCP задержки / пинга)
+    // Проверка прокси по протоколу (ProxyProbe). testCustomProxy — для
+    // диалога; existingId — редактируемый прокси: пустой pass берётся из него.
     Q_INVOKABLE void testProxy(const QString &id);
-    Q_INVOKABLE void testCustomProxy(int type, const QString &host, int port,
-                                    bool auth, const QString &user, const QString &pass);
+    Q_INVOKABLE void testCustomProxy(int type, const QString &host, int port, bool auth,
+                                     const QString &user, const QString &pass,
+                                     const QString &existingId = QString());
 
-    // Регистрация запущенного процесса игры: привязка к слоту, создание shared config,
-    // и инжект rfvk_proxy.dll (если выбран прокси).
+    // Учесть запущенный клиент в слоте; для прокси — общая память и
+    // rfvk_proxy.dll. false — клиент не учтён (для прокси он уже закрыт),
+    // причина — в журнале.
     bool registerProcess(qint64 pid, const QString &slotId, const QString &nick);
 
 signals:
     void log(const QString &text, int level);
     void toast(const QString &text, int level);
-    void totalClientsChanged();
-    void availableSlotsCountChanged();
     void slotsChanged();
     void testFinished(const QString &id, bool ok, int pingMs, const QString &message);
     void customTestFinished(bool ok, int pingMs, const QString &message);
 
-private slots:
-    void pollProcesses();
-
 private:
+    struct Session {
+        qint64 pid = 0;
+        QString slotId;
+        QString nick;
+        void *process = nullptr;  // HANDLE: держим, чтобы PID не переиспользовался
+        void *mapping = nullptr;  // HANDLE общей памяти (только прокси)
+        void *view = nullptr;     // rfvk_proxy::SharedConfig *
+        std::shared_ptr<remote_load::Job> load;
+        QElapsedTimer started;
+        bool confirmed = false;   // прямой IP — сразу; прокси — по hookStatus
+        QString lastStatus;       // последняя строка библиотеки, ушедшая в журнал
+    };
+
     void loadSettings();
     void saveSettings();
-    void ensureDirectSlot();
+    // Пусто — данные прокси годятся; иначе текст ошибки для пользователя.
+    static QString validate(int type, const QString &host, int port, bool auth,
+                            const QString &user, const QString &pass);
 
-    struct InjectJob {
-        qint64 pid = 0;
-        QString slotId;
-        QString nick;
-        std::shared_ptr<remote_load::Job> loadJob;
-        int attempts = 0;
-    };
-
-    struct ProcessSession {
-        qint64 pid = 0;
-        QString slotId;
-        QString nick;
-        void *mappingHandle = nullptr;
-        void *view = nullptr;
-    };
-
-    void pollInjectJob(InjectJob job);
-    void cleanupProcessSession(qint64 pid);
+    void startInject(qint64 pid);
+    void handleLoad(qint64 pid, const remote_load::Result &r);
+    void poll();
+    void checkSession(Session &s);
+    // Закрыть клиент, который не удалось пустить через прокси.
+    void failSession(qint64 pid, const QString &reason);
+    // Убрать клиент из слота и освободить ресурсы (процесс не трогает).
+    void endSession(qint64 pid);
+    QString slotName(const QString &slotId) const;
+    void runProbe(const ProxySlot &proxy, const std::function<void(bool, int, const QString &)> &done);
 
     ProxyModel m_model;
     QSettings m_settings;
     QTimer m_pollTimer;
-    QHash<qint64, ProcessSession> m_sessions;
+    QHash<qint64, Session> m_sessions;
 };

@@ -1,7 +1,5 @@
 #include "AccountModel.h"
 #include "Controller.h"
-#include "ProxyManager.h"
-#include "ProxyModel.h"
 #include "StubAuthBackend.h"
 #include "VkPlayAuthBackend.h"
 

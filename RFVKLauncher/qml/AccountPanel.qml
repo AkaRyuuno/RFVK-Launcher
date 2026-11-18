@@ -252,7 +252,7 @@ Item {
                         role: "bodyStrong"
                     }
                     AppText {
-                        text: "Через какой IP запускать этот аккаунт (макс. 5 окон на слот)"
+                        text: Strings.slotSelectorHint
                         role: "caption"
                         color: Theme.muted
                     }
@@ -261,7 +261,8 @@ Item {
                 AppSelect {
                     id: slotSelect
                     Layout.preferredWidth: 260
-                    model: ProxyManager.slotOptions
+                    // «Авто» — первым пунктом, дальше слоты из ProxyManager.
+                    model: [{ label: Strings.slotAuto, value: "auto" }].concat(ProxyManager.slotOptions)
 
                     Component.onCompleted: syncIndex()
                     Connections {
@@ -274,9 +275,8 @@ Item {
                     }
 
                     function syncIndex() {
-                        var target = (panel.acc && panel.acc.preferredSlot && panel.acc.preferredSlot.length > 0)
-                                   ? panel.acc.preferredSlot : "auto"
-                        var opts = ProxyManager.slotOptions
+                        var target = (panel.acc && panel.acc.preferredSlot) ? panel.acc.preferredSlot : "auto"
+                        var opts = slotSelect.model
                         for (var i = 0; i < opts.length; ++i) {
                             if (opts[i].value === target) {
                                 slotSelect.currentIndex = i
@@ -287,10 +287,8 @@ Item {
                     }
 
                     onActivated: {
-                        if (panel.acc && panel.acc.id) {
-                            var val = currentValue
-                            App.setAccountPreferredSlot(panel.acc.id, val === "auto" ? "" : val)
-                        }
+                        if (panel.acc && panel.acc.id)
+                            App.setAccountPreferredSlot(panel.acc.id, currentValue)
                     }
                 }
             }

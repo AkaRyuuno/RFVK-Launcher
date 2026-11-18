@@ -15,6 +15,7 @@ qt_add_executable(RFVKLauncher
     ${CMAKE_SOURCE_DIR}/proxy/rfvk_proxy_shared.h
     src/ProxySlot.h
     src/ProxyModel.cpp src/ProxyModel.h
+    src/ProxyProbe.cpp src/ProxyProbe.h
     src/ProxyManager.cpp src/ProxyManager.h
     src/Controller.cpp src/Controller.h
 )

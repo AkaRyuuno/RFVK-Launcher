@@ -88,7 +88,7 @@ Item {
                             role: "bodyStrong"
                         }
                         AppText {
-                            text: ProxyManager.totalActiveClients > 0 ? "Слоты заняты клиентами" : "Все слоты свободны"
+                            text: ProxyManager.totalActiveClients > 0 ? Strings.slotsBusy : Strings.slotsIdle
                             role: "caption"
                             color: Theme.muted
                         }
@@ -126,7 +126,7 @@ Item {
                             role: "bodyStrong"
                         }
                         AppText {
-                            text: ProxyManager.availableSlotsCount > 0 ? "Готовы к запуску окон" : "Все доступные слоты заполнены (5/5)"
+                            text: ProxyManager.availableSlotsCount > 0 ? Strings.slotsReady : Strings.slotsAllFull
                             role: "caption"
                             color: ProxyManager.availableSlotsCount > 0 ? Theme.muted : Theme.err
                         }
@@ -160,12 +160,12 @@ Item {
                     Column {
                         anchors.verticalCenter: parent.verticalCenter
                         AppText {
-                            text: ProxyManager.proxyDllAvailable ? "Сетевой перехват активен" : "Библиотека не найдена"
+                            text: ProxyManager.proxyDllAvailable ? Strings.proxyDllReady : Strings.proxyDllMissing
                             role: "bodyStrong"
                             color: ProxyManager.proxyDllAvailable ? Theme.text : Theme.err
                         }
                         AppText {
-                            text: ProxyManager.proxyDllAvailable ? "rfvk_proxy.dll готова" : "Соберите с RFVK_PROXY=ON"
+                            text: ProxyManager.proxyDllAvailable ? Strings.proxyDllReadyHint : Strings.proxyDllMissingHint
                             role: "caption"
                             color: Theme.muted
                         }

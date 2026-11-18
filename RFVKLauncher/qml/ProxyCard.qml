@@ -7,7 +7,6 @@ import Rfvk
 // пингом, списком активных PIDs и кнопками управления.
 Rectangle {
     id: card
-    property var slotData: model
     readonly property var pids: (model && typeof model.activePids !== "undefined") ? model.activePids : []
     signal editRequested(var slot)
     signal deleteRequested(string slotId, string slotName)
@@ -97,7 +96,7 @@ Rectangle {
                         AppText {
                             id: authText
                             anchors.centerIn: parent
-                            text: "Auth"
+                            text: Strings.proxyAuthBadge
                             role: "caption"
                             font.weight: Font.DemiBold
                             color: Theme.accent
@@ -110,6 +109,15 @@ Rectangle {
                         : (model.host + ":" + model.port + (model.authEnabled && model.username.length > 0 ? " · " + model.username : ""))
                     role: "small"
                     color: Theme.muted
+                    elide: Text.ElideRight
+                    width: parent.width
+                }
+                // Итог последней проверки (причина ошибки — здесь же).
+                AppText {
+                    visible: !model.isDirect && model.lastStatus.length > 0
+                    text: model.lastStatus
+                    role: "caption"
+                    color: model.testOk ? Theme.muted : Theme.err
                     elide: Text.ElideRight
                     width: parent.width
                 }
@@ -126,19 +134,15 @@ Rectangle {
                     width: 7
                     height: 7
                     radius: 3.5
-                    color: model.pingMs >= 0 ? Theme.ok
-                         : model.pingMs === -2 ? Theme.err
-                         : Theme.muted
+                    color: !model.testOk ? Theme.err : model.pingMs >= 0 ? Theme.ok : Theme.muted
                 }
                 AppText {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: model.pingMs >= 0 ? (model.pingMs + " мс")
-                        : model.pingMs === -2 ? "Ошибка"
+                    text: !model.testOk ? Strings.proxyPingError
+                        : model.pingMs >= 0 ? Strings.proxyPingMs(model.pingMs)
                         : "—"
                     role: "caption"
-                    color: model.pingMs >= 0 ? Theme.ok
-                         : model.pingMs === -2 ? Theme.err
-                         : Theme.muted
+                    color: !model.testOk ? Theme.err : model.pingMs >= 0 ? Theme.ok : Theme.muted
                 }
 
                 // Кнопка пинга
@@ -236,7 +240,7 @@ Rectangle {
                 AppText {
                     id: directPillText
                     anchors.centerIn: parent
-                    text: "Основной слот"
+                    text: Strings.proxyDirectBadge
                     role: "caption"
                     color: Theme.muted
                 }
@@ -262,7 +266,7 @@ Rectangle {
                 Row {
                     width: parent.width
                     AppText {
-                        text: "Занятость слота"
+                        text: Strings.slotLoad
                         role: "caption"
                         color: Theme.muted
                     }
@@ -305,7 +309,7 @@ Rectangle {
 
                 AppText {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: model.activeClients > 0 ? "Клиенты (PID):" : "Окна игры не запущены"
+                    text: model.activeClients > 0 ? Strings.slotPids : Strings.slotNoClients
                     role: "small"
                     color: Theme.muted
                 }
@@ -347,7 +351,7 @@ Rectangle {
                 AppText {
                     id: fullText
                     anchors.centerIn: parent
-                    text: "5/5 Лимит исчерпан"
+                    text: Strings.slotFull
                     role: "caption"
                     font.weight: Font.DemiBold
                     color: Theme.err

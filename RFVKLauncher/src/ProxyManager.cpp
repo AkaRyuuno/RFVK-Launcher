@@ -1,16 +1,21 @@
 #include "ProxyManager.h"
+#include "ProxyProbe.h"
 #include "RemoteLoadLibrary.h"
+#include "VkCrypto.h"
 #include "rfvk_proxy_shared.h"
 
 #include <QCoreApplication>
 #include <QDir>
-#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QTcpSocket>
 #include <QUuid>
+
+#include <cstring>
+#include <cwchar>
+#include <string>
+#include <utility>
 
 #ifdef Q_OS_WIN
 #ifndef WIN32_LEAN_AND_MEAN
@@ -19,49 +24,62 @@
 #include <windows.h>
 #endif
 
+namespace px = rfvk_proxy;
+
 namespace {
+constexpr int kPollMs = 250;                    // проверка клиентов и подтверждений
+constexpr int kLoadPollMs = 50;                 // проверка потока LoadLibraryW
+constexpr unsigned long kLoadTimeoutMs = 15000; // LoadLibraryW в клиенте — не дольше 15 с
+constexpr int kStartRetryMs = 25;               // kernel32 в только что запущенном клиенте
+constexpr qint64 kStartRetryWindowMs = 3000;    // появляется не сразу — повторяем до 3 с
+constexpr qint64 kConfirmTimeoutMs = 20000;     // подтверждение от библиотеки
 
-#ifdef Q_OS_WIN
-bool isProcessRunning(qint64 pid)
+const QString kListKey = QStringLiteral("proxy/list");
+const QString kAccountKey = QStringLiteral("proxy/account/");
+const QString kPasswordKey = QStringLiteral("passwordEnc");
+
+ProxySlot directSlot()
 {
-    if (pid <= 0)
-        return false;
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
-    if (!h)
-        return GetLastError() == ERROR_ACCESS_DENIED;
-    DWORD code = 0;
-    const bool ok = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
-    CloseHandle(h);
-    return ok;
+    ProxySlot s;
+    s.id = ProxySlot::directId();
+    s.name = QStringLiteral("Прямой IP (без прокси)");
+    s.lastStatus = QStringLiteral("Локальная сеть");
+    return s;
 }
-#else
-bool isProcessRunning(qint64) { return false; }
-#endif
-
 } // namespace
 
 ProxyManager::ProxyManager(QObject *parent)
-    : QObject(parent)
+    : QObject(parent),
+      // Тот же INI, что у Controller: все настройки лаунчера в одном файле.
+      m_settings(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("RFVK"),
+                 QStringLiteral("RFVKLauncher"))
 {
     loadSettings();
-    ensureDirectSlot();
-
-    m_pollTimer.setInterval(1000); // Проверка завершения процессов каждую секунду
-    connect(&m_pollTimer, &QTimer::timeout, this, &ProxyManager::pollProcesses);
-    m_pollTimer.start();
+    m_pollTimer.setInterval(kPollMs);
+    connect(&m_pollTimer, &QTimer::timeout, this, &ProxyManager::poll);
 }
 
 ProxyManager::~ProxyManager()
 {
-    for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
-        cleanupProcessSession(it.key());
+#ifdef Q_OS_WIN
+    // Клиенты продолжают работать: библиотека держит общую память сама.
+    // Модель и сигналы не трогаем — интерфейс к этому моменту уже разрушен.
+    for (const Session &s : std::as_const(m_sessions)) {
+        if (s.view)
+            UnmapViewOfFile(s.view);
+        if (s.mapping)
+            CloseHandle(static_cast<HANDLE>(s.mapping));
+        if (s.process)
+            CloseHandle(static_cast<HANDLE>(s.process));
     }
-    m_sessions.clear();
+#endif
 }
 
+// Путь в нативном виде: LoadLibraryW в клиенте требует обратные слэши.
 QString ProxyManager::proxyDllPath()
 {
-    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("rfvk_proxy.dll"));
+    return QDir::toNativeSeparators(
+        QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("rfvk_proxy.dll")));
 }
 
 bool ProxyManager::proxyDllAvailable()
@@ -69,56 +87,23 @@ bool ProxyManager::proxyDllAvailable()
     return QFileInfo::exists(proxyDllPath());
 }
 
-void ProxyManager::ensureDirectSlot()
-{
-    if (m_model.indexOfId(QStringLiteral("direct")) >= 0)
-        return;
-
-    ProxySlot direct;
-    direct.id = QStringLiteral("direct");
-    direct.name = QStringLiteral("Прямой IP (без прокси)");
-    direct.type = 0;
-    direct.maxClients = kMaxClientsPerSlot;
-    direct.enabled = true;
-    direct.lastStatus = QStringLiteral("Локальная сеть");
-
-    QVector<ProxySlot> current = m_model.slotItems();
-    current.prepend(direct);
-    m_model.setSlots(current);
-}
+// ─────────────────────────── настройки ──────────────────────────────────────
 
 void ProxyManager::loadSettings()
 {
-    const QString jsonStr = m_settings.value(QStringLiteral("proxyList")).toString();
-    QVector<ProxySlot> list;
-
-    // Слот 0 — Прямой IP
-    ProxySlot direct;
-    direct.id = QStringLiteral("direct");
-    direct.name = QStringLiteral("Прямой IP (без прокси)");
-    direct.type = 0;
-    direct.maxClients = kMaxClientsPerSlot;
-    direct.enabled = true;
-    direct.lastStatus = QStringLiteral("Локальная сеть");
-    list.append(direct);
-
-    if (!jsonStr.isEmpty()) {
-        const QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8());
-        if (doc.isArray()) {
-            const QJsonArray arr = doc.array();
-            for (const QJsonValue &v : arr) {
-                if (!v.isObject())
-                    continue;
-                ProxySlot s = ProxySlot::fromJson(v.toObject());
-                if (s.id == QStringLiteral("direct") || s.id.isEmpty())
-                    continue;
-                s.maxClients = kMaxClientsPerSlot;
-                s.activePids.clear();
-                list.append(s);
-            }
-        }
+    QVector<ProxySlot> list{directSlot()};
+    const QJsonArray arr = QJsonDocument::fromJson(m_settings.value(kListKey).toByteArray()).array();
+    for (const QJsonValue &v : arr) {
+        const QJsonObject obj = v.toObject();
+        ProxySlot s = ProxySlot::fromJson(obj);
+        if (s.id.isEmpty() || s.isDirect())
+            continue;
+        const QString hex = obj.value(kPasswordKey).toString();
+        if (!hex.isEmpty())
+            s.password = QString::fromUtf8(VkCrypto::dpapiUnprotect(QByteArray::fromHex(hex.toLatin1())));
+        s.lastStatus = QStringLiteral("Не проверен");
+        list.append(s);
     }
-
     m_model.setSlots(list);
 }
 
@@ -127,12 +112,35 @@ void ProxyManager::saveSettings()
     QJsonArray arr;
     for (const ProxySlot &s : m_model.slotItems()) {
         if (s.isDirect())
-            continue; // Слот direct всегда статический
-        arr.append(s.toJson());
+            continue;
+        QJsonObject obj = s.toJson();
+        if (s.authEnabled && !s.password.isEmpty())
+            obj[kPasswordKey] = QString::fromLatin1(VkCrypto::dpapiProtect(s.password.toUtf8()).toHex());
+        arr.append(obj);
     }
-    const QJsonDocument doc(arr);
-    m_settings.setValue(QStringLiteral("proxyList"), QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+    m_settings.setValue(kListKey, QJsonDocument(arr).toJson(QJsonDocument::Compact));
 }
+
+QString ProxyManager::validate(int type, const QString &host, int port, bool auth,
+                               const QString &user, const QString &pass)
+{
+    if (!ProxySlot::isProxyType(type))
+        return QStringLiteral("Неизвестный протокол прокси");
+    if (host.isEmpty())
+        return QStringLiteral("Укажите адрес прокси");
+    // Поля общей памяти с rfvk_proxy.dll — с завершающим нулём.
+    if (host.toUtf8().size() >= px::kHostLen)
+        return QStringLiteral("Слишком длинный адрес прокси");
+    if (port <= 0 || port > 65535)
+        return QStringLiteral("Некорректный порт (1–65535)");
+    if (auth && user.isEmpty())
+        return QStringLiteral("Укажите логин прокси");
+    if (user.toUtf8().size() >= px::kAuthLen || pass.toUtf8().size() >= px::kAuthLen)
+        return QStringLiteral("Логин и пароль — не длиннее %1 байт").arg(px::kAuthLen - 1);
+    return {};
+}
+
+// ─────────────────────────── слоты ──────────────────────────────────────────
 
 int ProxyManager::totalActiveClients() const
 {
@@ -155,21 +163,13 @@ int ProxyManager::availableSlotsCount() const
 QVariantList ProxyManager::slotOptions() const
 {
     QVariantList list;
-    {
-        QVariantMap m;
-        m[QStringLiteral("label")] = QStringLiteral("Авто (прямой IP или свободный прокси)");
-        m[QStringLiteral("value")] = QStringLiteral("auto");
-        list.append(m);
-    }
     for (const ProxySlot &s : m_model.slotItems()) {
-        QVariantMap m;
-        QString label = s.name + QStringLiteral(" (") + s.typeName() + QStringLiteral(") [") +
-                        s.capacityString() + QStringLiteral("]");
+        QString label = QStringLiteral("%1 (%2) [%3]").arg(s.name, s.typeName(), s.capacityString());
         if (s.isFull())
             label += QStringLiteral(" — заполнен");
-        m[QStringLiteral("label")] = label;
-        m[QStringLiteral("value")] = s.id;
-        list.append(m);
+        else if (!s.enabled)
+            label += QStringLiteral(" — выключен");
+        list.append(QVariantMap{{QStringLiteral("label"), label}, {QStringLiteral("value"), s.id}});
     }
     return list;
 }
@@ -178,102 +178,105 @@ QString ProxyManager::accountPreferredSlot(const QString &accountId) const
 {
     if (accountId.isEmpty())
         return QStringLiteral("auto");
-    return m_settings.value(QStringLiteral("accountProxy/") + accountId, QStringLiteral("auto")).toString();
+    return m_settings.value(kAccountKey + accountId, QStringLiteral("auto")).toString();
 }
 
 void ProxyManager::setAccountPreferredSlot(const QString &accountId, const QString &slotId)
 {
     if (accountId.isEmpty())
         return;
-    m_settings.setValue(QStringLiteral("accountProxy/") + accountId, slotId.isEmpty() ? QStringLiteral("auto") : slotId);
+    if (slotId.isEmpty() || slotId == QLatin1String("auto"))
+        m_settings.remove(kAccountKey + accountId);
+    else
+        m_settings.setValue(kAccountKey + accountId, slotId);
 }
 
-QString ProxyManager::allocateSlot(const QString &preferredSlotId)
+QString ProxyManager::allocateSlot(const QString &preferredSlotId) const
 {
-    // 1. Если запрошен конкретный слот (не "auto")
-    if (!preferredSlotId.isEmpty() && preferredSlotId != QStringLiteral("auto")) {
+    if (!preferredSlotId.isEmpty() && preferredSlotId != QLatin1String("auto")) {
         const int idx = m_model.indexOfId(preferredSlotId);
         if (idx >= 0) {
             const ProxySlot &s = m_model.at(idx);
-            if (!s.isFull() && (s.enabled || s.isDirect()))
+            if (s.enabled && !s.isFull())
                 return s.id;
         }
     }
-
-    // 2. Авто-выбор:
-    // Сначала проверяем Слот 0 (Прямой IP) — если там меньше 5 клиентов, используем его!
-    const int directIdx = m_model.indexOfId(QStringLiteral("direct"));
-    if (directIdx >= 0 && !m_model.at(directIdx).isFull())
-        return QStringLiteral("direct");
-
-    // 3. Если на прямом IP уже 5/5 окон, ищем первый доступный прокси со слотом < 5
     for (const ProxySlot &s : m_model.slotItems()) {
-        if (s.isDirect())
-            continue;
+        // Порядок модели: прямой IP первым, затем прокси в порядке добавления.
         if (s.enabled && !s.isFull())
             return s.id;
     }
-
-    // Все слоты заполнены!
     return {};
 }
 
 QString ProxyManager::addProxy(const QString &name, int type, const QString &host, int port,
-                              bool auth, const QString &user, const QString &pass)
+                               bool auth, const QString &user, const QString &pass)
 {
     const QString cleanHost = host.trimmed();
-    if (cleanHost.isEmpty() || port <= 0 || port > 65535) {
-        emit toast(QStringLiteral("Укажите корректный адрес и порт прокси"), 2);
+    const QString cleanUser = user.trimmed();
+    if (const QString err = validate(type, cleanHost, port, auth, cleanUser, pass); !err.isEmpty()) {
+        emit toast(err, 2);
         return {};
     }
 
     ProxySlot s;
     s.id = QStringLiteral("proxy_") + QUuid::createUuid().toString(QUuid::WithoutBraces);
-    s.name = name.trimmed().isEmpty() ? (s.typeName() + QStringLiteral(" ") + cleanHost) : name.trimmed();
-    s.type = type;
+    s.type = static_cast<ProxySlot::Type>(type);
     s.host = cleanHost;
     s.port = static_cast<quint16>(port);
+    s.name = name.trimmed().isEmpty() ? (s.typeName() + QLatin1Char(' ') + cleanHost) : name.trimmed();
     s.authEnabled = auth;
-    s.username = user.trimmed();
-    s.password = pass;
-    s.maxClients = kMaxClientsPerSlot;
-    s.enabled = true;
+    s.username = auth ? cleanUser : QString();
+    s.password = auth ? pass : QString();
     s.lastStatus = QStringLiteral("Не проверен");
 
     m_model.addSlot(s);
     saveSettings();
-    emit availableSlotsCountChanged();
     emit slotsChanged();
     emit toast(QStringLiteral("Прокси «%1» добавлен").arg(s.name), 1);
     emit log(QStringLiteral("Добавлен прокси: %1 (%2:%3)").arg(s.name, s.host).arg(s.port), 0);
-
-    // Автоматически запускаем пинг-проверку нового прокси
     testProxy(s.id);
     return s.id;
 }
 
-void ProxyManager::updateProxy(const QString &id, const QString &name, int type, const QString &host,
-                              int port, bool auth, const QString &user, const QString &pass, bool enabled)
+bool ProxyManager::updateProxy(const QString &id, const QString &name, int type, const QString &host,
+                               int port, bool auth, const QString &user, const QString &pass)
 {
     const int idx = m_model.indexOfId(id);
     if (idx < 0 || m_model.at(idx).isDirect())
-        return;
+        return false;
 
     ProxySlot s = m_model.at(idx);
-    s.name = name.trimmed().isEmpty() ? s.name : name.trimmed();
-    s.type = type;
-    s.host = host.trimmed();
+    const QString cleanHost = host.trimmed();
+    const QString cleanUser = user.trimmed();
+    const QString newPass = pass.isEmpty() ? s.password : pass;
+    if (const QString err = validate(type, cleanHost, port, auth, cleanUser, newPass); !err.isEmpty()) {
+        emit toast(err, 2);
+        return false;
+    }
+
+    if (!name.trimmed().isEmpty())
+        s.name = name.trimmed();
+    s.type = static_cast<ProxySlot::Type>(type);
+    s.host = cleanHost;
     s.port = static_cast<quint16>(port);
     s.authEnabled = auth;
-    s.username = user.trimmed();
-    s.password = pass;
-    s.enabled = enabled;
+    s.username = auth ? cleanUser : QString();
+    s.password = auth ? newPass : QString();
+    s.pingMs = -1;
+    s.testOk = true;
+    s.lastStatus = QStringLiteral("Не проверен");
 
     m_model.updateSlot(idx, s);
     saveSettings();
-    emit availableSlotsCountChanged();
     emit slotsChanged();
-    emit toast(QStringLiteral("Прокси «%1» обновлен").arg(s.name), 1);
+    emit toast(QStringLiteral("Прокси «%1» обновлён").arg(s.name), 1);
+    // Уже запущенные клиенты работают со старыми настройками до перезапуска.
+    if (s.activeClients() > 0)
+        emit log(QStringLiteral("Прокси «%1» изменён — запущенные через него окна (%2) используют прежние "
+                                "настройки до перезапуска").arg(s.name).arg(s.activeClients()), 0);
+    testProxy(s.id);
+    return true;
 }
 
 void ProxyManager::removeProxy(const QString &id)
@@ -284,13 +287,12 @@ void ProxyManager::removeProxy(const QString &id)
 
     const ProxySlot s = m_model.at(idx);
     if (s.activeClients() > 0) {
-        emit toast(QStringLiteral("Нельзя удалить прокси, пока в нём есть активные окна (%1)").arg(s.capacityString()), 2);
+        emit toast(QStringLiteral("Нельзя удалить прокси, пока через него запущены окна (%1)")
+                       .arg(s.capacityString()), 2);
         return;
     }
-
     m_model.removeSlot(idx);
     saveSettings();
-    emit availableSlotsCountChanged();
     emit slotsChanged();
     emit toast(QStringLiteral("Прокси «%1» удалён").arg(s.name), 1);
 }
@@ -300,286 +302,325 @@ void ProxyManager::setProxyEnabled(const QString &id, bool enabled)
     const int idx = m_model.indexOfId(id);
     if (idx < 0 || m_model.at(idx).isDirect())
         return;
-
     ProxySlot s = m_model.at(idx);
     if (s.enabled == enabled)
         return;
     s.enabled = enabled;
     m_model.updateSlot(idx, s);
     saveSettings();
-    emit availableSlotsCountChanged();
     emit slotsChanged();
+}
+
+// ─────────────────────────── проверка прокси ────────────────────────────────
+
+void ProxyManager::runProbe(const ProxySlot &proxy, const std::function<void(bool, int, const QString &)> &done)
+{
+    auto *probe = new ProxyProbe(proxy, this);
+    connect(probe, &ProxyProbe::finished, this, done);
+    probe->start();
 }
 
 void ProxyManager::testProxy(const QString &id)
 {
     const int idx = m_model.indexOfId(id);
-    if (idx < 0)
+    if (idx < 0 || m_model.at(idx).isDirect())
         return;
 
-    const ProxySlot s = m_model.at(idx);
-    if (s.isDirect()) {
-        ProxySlot upd = s;
-        upd.pingMs = 0;
-        upd.lastStatus = QStringLiteral("Локальное подключение");
-        m_model.updateSlot(idx, upd);
-        emit testFinished(id, true, 0, upd.lastStatus);
-        return;
-    }
+    ProxySlot s = m_model.at(idx);
+    s.lastStatus = QStringLiteral("Проверка…");
+    m_model.updateSlot(idx, s);
 
-    auto *socket = new QTcpSocket(this);
-    auto *timer = new QElapsedTimer();
-    timer->start();
-
-    connect(socket, &QTcpSocket::connected, this, [this, id, socket, timer]() {
-        const int elapsed = static_cast<int>(timer->restart());
+    runProbe(s, [this, id](bool ok, int pingMs, const QString &message) {
         const int row = m_model.indexOfId(id);
         if (row >= 0) {
-            ProxySlot s = m_model.at(row);
-            s.pingMs = elapsed;
-            s.lastStatus = QStringLiteral("Доступен (%1 мс)").arg(elapsed);
-            m_model.updateSlot(row, s);
+            ProxySlot upd = m_model.at(row);
+            upd.pingMs = ok ? pingMs : -1;
+            upd.testOk = ok;
+            upd.lastStatus = ok ? QStringLiteral("Доступен · %1").arg(message)
+                                : QStringLiteral("Недоступен: %1").arg(message);
+            m_model.updateSlot(row, upd);
         }
-        emit testFinished(id, true, elapsed, QStringLiteral("Доступен (%1 мс)").arg(elapsed));
-        delete timer;
-        socket->disconnectFromHost();
-        socket->deleteLater();
-    });
-
-    connect(socket, &QTcpSocket::errorOccurred, this, [this, id, socket, timer](QAbstractSocket::SocketError) {
-        const QString err = socket->errorString();
-        const int row = m_model.indexOfId(id);
-        if (row >= 0) {
-            ProxySlot s = m_model.at(row);
-            s.pingMs = -1;
-            s.lastStatus = QStringLiteral("Недоступен: %1").arg(err);
-            m_model.updateSlot(row, s);
-        }
-        emit testFinished(id, false, -1, err);
-        delete timer;
-        socket->deleteLater();
-    });
-
-    socket->connectToHost(s.host, s.port);
-    QTimer::singleShot(4000, socket, [socket]() {
-        if (socket->state() != QAbstractSocket::ConnectedState)
-            socket->abort();
+        emit testFinished(id, ok, pingMs, message);
     });
 }
 
-void ProxyManager::testCustomProxy(int /*type*/, const QString &host, int port,
-                                  bool /*auth*/, const QString &/*user*/, const QString &/*pass*/)
+void ProxyManager::testCustomProxy(int type, const QString &host, int port, bool auth,
+                                   const QString &user, const QString &pass, const QString &existingId)
 {
+    QString usePass = pass;
+    if (usePass.isEmpty() && !existingId.isEmpty()) {
+        const int idx = m_model.indexOfId(existingId);
+        if (idx >= 0)
+            usePass = m_model.at(idx).password;
+    }
     const QString cleanHost = host.trimmed();
-    if (cleanHost.isEmpty() || port <= 0 || port > 65535) {
-        emit customTestFinished(false, -1, QStringLiteral("Неверный хост или порт"));
+    const QString cleanUser = user.trimmed();
+    if (const QString err = validate(type, cleanHost, port, auth, cleanUser, usePass); !err.isEmpty()) {
+        emit customTestFinished(false, -1, err);
         return;
     }
 
-    auto *socket = new QTcpSocket(this);
-    auto *timer = new QElapsedTimer();
-    timer->start();
-
-    connect(socket, &QTcpSocket::connected, this, [this, socket, timer]() {
-        const int elapsed = static_cast<int>(timer->restart());
-        emit customTestFinished(true, elapsed, QStringLiteral("Соединение установлено (%1 мс)").arg(elapsed));
-        delete timer;
-        socket->disconnectFromHost();
-        socket->deleteLater();
+    ProxySlot s;
+    s.type = static_cast<ProxySlot::Type>(type);
+    s.host = cleanHost;
+    s.port = static_cast<quint16>(port);
+    s.authEnabled = auth;
+    s.username = cleanUser;
+    s.password = usePass;
+    runProbe(s, [this](bool ok, int pingMs, const QString &message) {
+        emit customTestFinished(ok, pingMs, message);
     });
+}
 
-    connect(socket, &QTcpSocket::errorOccurred, this, [this, socket, timer](QAbstractSocket::SocketError) {
-        const QString err = socket->errorString();
-        emit customTestFinished(false, -1, QStringLiteral("Ошибка подключения: %1").arg(err));
-        delete timer;
-        socket->deleteLater();
-    });
+// ─────────────────────────── клиенты игры ───────────────────────────────────
 
-    socket->connectToHost(cleanHost, static_cast<quint16>(port));
-    QTimer::singleShot(4000, socket, [socket]() {
-        if (socket->state() != QAbstractSocket::ConnectedState)
-            socket->abort();
-    });
+QString ProxyManager::slotName(const QString &slotId) const
+{
+    const int idx = m_model.indexOfId(slotId);
+    return idx >= 0 ? m_model.at(idx).name : slotId;
 }
 
 bool ProxyManager::registerProcess(qint64 pid, const QString &slotId, const QString &nick)
 {
-    const int idx = m_model.indexOfId(slotId);
-    if (idx < 0)
-        return false;
-
-    ProxySlot s = m_model.at(idx);
-    if (s.isFull()) {
-        emit toast(QStringLiteral("Слот «%1» переполнен (максимум %2 окон)").arg(s.name).arg(kMaxClientsPerSlot), 2);
-        return false;
-    }
-
-    s.activePids.append(pid);
-    m_model.updateSlot(idx, s);
-    emit totalClientsChanged();
-    emit slotsChanged();
-
-    // 1. Если выбран прямой IP
-    if (s.isDirect()) {
-        emit log(QStringLiteral("Клиент RF Online (PID %1, %2) запущен напрямую · Слот «%3»: %4")
-                     .arg(pid).arg(nick, s.name, s.capacityString()),
-                 0);
-        return true;
-    }
-
-    // 2. Если выбран прокси — настраиваем общую память и инжектим rfvk_proxy.dll
 #ifdef Q_OS_WIN
-    const std::wstring mapName = std::wstring(rfvk_proxy::kMappingPrefix) + std::to_wstring(pid);
-    HANDLE hMap = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
-                                     sizeof(rfvk_proxy::SharedConfig), mapName.c_str());
-    if (!hMap) {
-        emit log(QStringLiteral("Сбой создания общей памяти прокси для PID %1 (код %2)").arg(pid).arg(GetLastError()), 2);
+    const int idx = m_model.indexOfId(slotId);
+    if (pid <= 0 || idx < 0 || m_sessions.contains(pid))
         return false;
-    }
+    ProxySlot slot = m_model.at(idx);
 
-    auto *cfg = static_cast<rfvk_proxy::SharedConfig *>(
-        MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(rfvk_proxy::SharedConfig)));
-    if (!cfg) {
-        CloseHandle(hMap);
-        emit log(QStringLiteral("Сбой маппинга памяти прокси для PID %1").arg(pid), 2);
-        return false;
-    }
-
-    std::memset(cfg, 0, sizeof(*cfg));
-    cfg->magic = rfvk_proxy::kMagic;
-    cfg->version = rfvk_proxy::kVersion;
-    cfg->size = sizeof(*cfg);
-    cfg->type = static_cast<uint32_t>(s.type == 2 ? rfvk_proxy::ProxyType::HttpConnect : rfvk_proxy::ProxyType::Socks5);
-    const QByteArray hostUtf8 = s.host.toUtf8();
-    strncpy_s(cfg->proxyHost, hostUtf8.constData(), _TRUNCATE);
-    cfg->proxyPort = s.port;
-    cfg->authEnabled = s.authEnabled ? 1 : 0;
-    if (s.authEnabled) {
-        const QByteArray userUtf8 = s.username.toUtf8();
-        const QByteArray passUtf8 = s.password.toUtf8();
-        strncpy_s(cfg->username, userUtf8.constData(), _TRUNCATE);
-        strncpy_s(cfg->password, passUtf8.constData(), _TRUNCATE);
-    }
-    cfg->state = rfvk_proxy::StateInit;
-
-    ProcessSession sess;
+    Session sess;
     sess.pid = pid;
     sess.slotId = slotId;
     sess.nick = nick;
-    sess.mappingHandle = hMap;
-    sess.view = cfg;
-    m_sessions.insert(pid, sess);
-
-    // Запускаем инжект rfvk_proxy.dll
-    const QString dllPath = proxyDllPath();
-    if (!QFileInfo::exists(dllPath)) {
-        emit log(QStringLiteral("rfvk_proxy.dll не найдена рядом с лаунчером (%1)").arg(dllPath), 2);
+    sess.started.start();
+    // SYNCHRONIZE — ждать завершения, TERMINATE — закрыть при сбое прокси.
+    sess.process = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                               FALSE, static_cast<DWORD>(pid));
+    if (!sess.process) {
+        emit log(QStringLiteral("Слоты: нет доступа к клиенту (PID %1, код %2) — окно не учтено")
+                     .arg(pid).arg(GetLastError()), 2);
         return false;
     }
 
-    InjectJob job;
-    job.pid = pid;
-    job.slotId = slotId;
-    job.nick = nick;
-    job.loadJob = std::make_shared<remote_load::Job>();
-    job.attempts = 0;
-
-    pollInjectJob(job);
-#endif
-
-    return true;
-}
-
-void ProxyManager::pollInjectJob(InjectJob job)
-{
-#ifdef Q_OS_WIN
-    const QString dll = proxyDllPath();
-    remote_load::Result r = remote_load::start(static_cast<DWORD>(job.pid), dll.toStdWString(), *job.loadJob);
-
-    if (r.step == remote_load::Step::Loaded) {
-        emit log(QStringLiteral("Туннель активирован · PID %1 (%2) · %3 [%4:%5]")
-                     .arg(job.pid).arg(job.nick)
-                     .arg(m_model.indexOfId(job.slotId) >= 0 ? m_model.at(m_model.indexOfId(job.slotId)).name : job.slotId)
-                     .arg(m_model.indexOfId(job.slotId) >= 0 ? m_model.at(m_model.indexOfId(job.slotId)).host : QString())
-                     .arg(m_model.indexOfId(job.slotId) >= 0 ? m_model.at(m_model.indexOfId(job.slotId)).port : 0),
-                 1);
-        return;
-    }
-
-    if (r.step == remote_load::Step::Pending) {
-        // Поллинг завершения LoadLibraryW
-        auto checkPending = [this, job]() mutable {
-            remote_load::Result pollRes = remote_load::poll(*job.loadJob, 3000);
-            if (pollRes.step == remote_load::Step::Loaded) {
-                emit log(QStringLiteral("rfvk_proxy.dll загружена в процесс PID %1").arg(job.pid), 1);
-            } else if (pollRes.step == remote_load::Step::Failed) {
-                emit log(QStringLiteral("Ошибка загрузки rfvk_proxy.dll: %1").arg(QString::fromStdWString(pollRes.message)), 2);
-            }
-        };
-        QTimer::singleShot(50, this, checkPending);
-        return;
-    }
-
-    // Если процесс только что стартовал, kernel32 может быть не готов в первые 20-30 мс
-    if (job.attempts < 15 && isProcessRunning(job.pid)) {
-        ++job.attempts;
-        QTimer::singleShot(25, this, [this, job]() {
-            pollInjectJob(job);
-        });
-        return;
-    }
-
-    emit log(QStringLiteral("Не удалось подключить rfvk_proxy.dll к PID %1: %2")
-                 .arg(job.pid).arg(QString::fromStdWString(r.message)),
-             2);
-#endif
-}
-
-void ProxyManager::cleanupProcessSession(qint64 pid)
-{
-#ifdef Q_OS_WIN
-    if (m_sessions.contains(pid)) {
-        ProcessSession sess = m_sessions.take(pid);
+    auto fail = [&](const QString &reason) {
+        TerminateProcess(static_cast<HANDLE>(sess.process), 1);
         if (sess.view)
             UnmapViewOfFile(sess.view);
-        if (sess.mappingHandle)
-            CloseHandle(static_cast<HANDLE>(sess.mappingHandle));
+        if (sess.mapping)
+            CloseHandle(static_cast<HANDLE>(sess.mapping));
+        CloseHandle(static_cast<HANDLE>(sess.process));
+        const QString msg = QStringLiteral("Клиент %1 закрыт: %2").arg(nick, reason);
+        emit log(msg, 2);
+        emit toast(msg, 2);
+        return false;
+    };
+
+    if (!slot.isDirect()) {
+        if (!proxyDllAvailable())
+            return fail(QStringLiteral("rfvk_proxy.dll не найдена рядом с лаунчером"));
+
+        const std::wstring mapName = std::wstring(px::kMappingPrefix) + std::to_wstring(pid);
+        HANDLE map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                        sizeof(px::SharedConfig), mapName.c_str());
+        const DWORD mapErr = GetLastError();
+        if (map && mapErr == ERROR_ALREADY_EXISTS) {
+            // Кто-то создал отображение раньше нас — его содержимому верить нельзя.
+            CloseHandle(map);
+            return fail(QStringLiteral("общая память прокси уже занята другим процессом"));
+        }
+        if (!map)
+            return fail(QStringLiteral("не удалось создать общую память (код %1)").arg(mapErr));
+        sess.mapping = map;
+        auto *cfg = static_cast<px::SharedConfig *>(
+            MapViewOfFile(map, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(px::SharedConfig)));
+        if (!cfg)
+            return fail(QStringLiteral("не удалось отобразить общую память (код %1)").arg(GetLastError()));
+        sess.view = cfg;
+
+        std::memset(cfg, 0, sizeof(*cfg));
+        cfg->magic = px::kMagic;
+        cfg->version = px::kVersion;
+        cfg->size = sizeof(*cfg);
+        cfg->type = static_cast<std::uint32_t>(slot.type);
+        // Длины проверены validate() — строки влезают вместе с нулём.
+        const QByteArray host = slot.host.toUtf8();
+        std::memcpy(cfg->proxyHost, host.constData(), qMin<qsizetype>(host.size(), px::kHostLen - 1));
+        cfg->proxyPort = slot.port;
+        if (slot.authEnabled) {
+            const QByteArray user = slot.username.toUtf8();
+            const QByteArray pass = slot.password.toUtf8();
+            cfg->authEnabled = 1;
+            std::memcpy(cfg->username, user.constData(), qMin<qsizetype>(user.size(), px::kAuthLen - 1));
+            std::memcpy(cfg->password, pass.constData(), qMin<qsizetype>(pass.size(), px::kAuthLen - 1));
+        }
+        sess.load = std::make_shared<remote_load::Job>();
+    } else {
+        sess.confirmed = true;
     }
+
+    slot.activePids.append(pid);
+    m_model.updateSlot(idx, slot);
+    m_sessions.insert(pid, sess);
+    m_pollTimer.start();
+    emit slotsChanged();
+
+    if (slot.isDirect()) {
+        emit log(QStringLiteral("%1 · прямой IP · слот «%2»: %3").arg(nick, slot.name, slot.capacityString()), 0);
+    } else {
+        emit log(QStringLiteral("%1 · подключаю прокси «%2» (%3:%4)…").arg(nick, slot.name, slot.host).arg(slot.port), 0);
+        startInject(pid);
+    }
+    return true;
+#else
+    Q_UNUSED(pid)
+    Q_UNUSED(slotId)
+    Q_UNUSED(nick)
+    return false;
 #endif
 }
 
-void ProxyManager::pollProcesses()
+void ProxyManager::startInject(qint64 pid)
 {
-    bool changed = false;
+#ifdef Q_OS_WIN
+    auto it = m_sessions.find(pid);
+    if (it == m_sessions.end())
+        return;
+    handleLoad(pid, remote_load::start(static_cast<unsigned long>(pid), proxyDllPath().toStdWString(), *it->load));
+#endif
+}
 
-    for (int row = 0; row < m_model.rowCount(); ++row) {
-        ProxySlot &s = m_model.slotRef(row);
-        if (s.activePids.isEmpty())
+void ProxyManager::handleLoad(qint64 pid, const remote_load::Result &r)
+{
+#ifdef Q_OS_WIN
+    auto it = m_sessions.find(pid);
+    if (it == m_sessions.end())
+        return; // клиент уже закрыт
+    switch (r.step) {
+    case remote_load::Step::Loaded:
+        return; // дальше ждём hookStatus в poll()
+    case remote_load::Step::Pending:
+        QTimer::singleShot(kLoadPollMs, this, [this, pid] {
+            auto it = m_sessions.find(pid);
+            if (it != m_sessions.end())
+                handleLoad(pid, remote_load::poll(*it->load, kLoadTimeoutMs));
+        });
+        return;
+    case remote_load::Step::Failed:
+        // В только что запущенном клиенте kernel32 появляется не сразу.
+        if (it->started.elapsed() < kStartRetryWindowMs
+            && WaitForSingleObject(static_cast<HANDLE>(it->process), 0) == WAIT_TIMEOUT) {
+            it->load = std::make_shared<remote_load::Job>();
+            QTimer::singleShot(kStartRetryMs, this, [this, pid] { startInject(pid); });
+            return;
+        }
+        failSession(pid, QStringLiteral("rfvk_proxy.dll не подключилась: ") + QString::fromStdWString(r.message));
+        return;
+    }
+#else
+    Q_UNUSED(pid)
+    Q_UNUSED(r)
+#endif
+}
+
+void ProxyManager::poll()
+{
+#ifdef Q_OS_WIN
+    const QList<qint64> pids = m_sessions.keys();
+    for (qint64 pid : pids) {
+        auto it = m_sessions.find(pid);
+        if (it == m_sessions.end())
             continue;
-
-        QList<qint64> alive;
-        for (qint64 pid : s.activePids) {
-            if (isProcessRunning(pid)) {
-                alive.append(pid);
-            } else {
-                cleanupProcessSession(pid);
-                changed = true;
-                emit log(QStringLiteral("Окно игры (PID %1) закрыто · Слот «%2» освобождён: %3/5")
-                             .arg(pid).arg(s.name).arg(alive.size()),
-                         0);
-            }
+        if (WaitForSingleObject(static_cast<HANDLE>(it->process), 0) != WAIT_TIMEOUT) {
+            const QString nick = it->nick;
+            const QString slotId = it->slotId;
+            endSession(pid);
+            const int idx = m_model.indexOfId(slotId);
+            emit log(QStringLiteral("Окно %1 закрыто · слот «%2» освобождён: %3")
+                         .arg(nick, slotName(slotId),
+                              idx >= 0 ? m_model.at(idx).capacityString() : QString()), 0);
+            continue;
         }
+        checkSession(*it);
+    }
+    if (m_sessions.isEmpty())
+        m_pollTimer.stop();
+#endif
+}
 
-        if (alive.size() != s.activePids.size()) {
-            s.activePids = alive;
-            m_model.notifySlotChanged(row);
+void ProxyManager::checkSession(Session &s)
+{
+    auto *cfg = static_cast<px::SharedConfig *>(s.view);
+    if (!cfg)
+        return;
+    const QString status = QString::fromWCharArray(cfg->statusText,
+                                                   static_cast<int>(wcsnlen(cfg->statusText, px::kStatusLen)));
+    if (!s.confirmed) {
+        switch (cfg->hookStatus) {
+        case px::HookOk:
+            s.confirmed = true;
+            s.lastStatus = status;
+            emit log(QStringLiteral("%1 · прокси «%2» подключён").arg(s.nick, slotName(s.slotId)), 1);
+            return;
+        case px::HookFailed:
+        case px::HookLeaked:
+            failSession(s.pid, status.isEmpty() ? QStringLiteral("перехват сети не встал") : status);
+            return;
+        default:
+            if (s.started.elapsed() > kConfirmTimeoutMs)
+                failSession(s.pid, QStringLiteral("rfvk_proxy.dll не подтвердила перехват за %1 с")
+                                       .arg(kConfirmTimeoutMs / 1000));
+            return;
         }
     }
-
-    if (changed) {
-        emit totalClientsChanged();
-    emit slotsChanged();
-        emit availableSlotsCountChanged();
-    emit slotsChanged();
+    // События туннеля — в журнал (ошибки — красным).
+    if (!status.isEmpty() && status != s.lastStatus) {
+        s.lastStatus = status;
+        emit log(s.nick + QStringLiteral(" · ") + status, cfg->tunnelState == px::TunnelError ? 2 : 0);
     }
+}
+
+void ProxyManager::failSession(qint64 pid, const QString &reason)
+{
+#ifdef Q_OS_WIN
+    auto it = m_sessions.find(pid);
+    if (it == m_sessions.end())
+        return;
+    const QString nick = it->nick;
+    TerminateProcess(static_cast<HANDLE>(it->process), 1);
+    endSession(pid);
+    const QString msg = QStringLiteral("Клиент %1 закрыт, чтобы не играть с реального IP: %2").arg(nick, reason);
+    emit log(msg, 2);
+    emit toast(msg, 2);
+#else
+    Q_UNUSED(pid)
+    Q_UNUSED(reason)
+#endif
+}
+
+void ProxyManager::endSession(qint64 pid)
+{
+#ifdef Q_OS_WIN
+    const auto it = m_sessions.constFind(pid);
+    if (it == m_sessions.constEnd())
+        return;
+    const Session s = *it;
+    m_sessions.erase(it);
+    if (s.view)
+        UnmapViewOfFile(s.view);
+    if (s.mapping)
+        CloseHandle(static_cast<HANDLE>(s.mapping));
+    if (s.process)
+        CloseHandle(static_cast<HANDLE>(s.process));
+
+    const int idx = m_model.indexOfId(s.slotId);
+    if (idx >= 0) {
+        ProxySlot slot = m_model.at(idx);
+        if (slot.activePids.removeAll(pid) > 0) {
+            m_model.updateSlot(idx, slot);
+            emit slotsChanged();
+        }
+    }
+#else
+    Q_UNUSED(pid)
+#endif
 }
