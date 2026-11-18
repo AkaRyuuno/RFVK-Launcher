@@ -3,7 +3,7 @@ import QtQuick.Controls.Basic
 import QtQuick.Dialogs
 import Rfvk
 
-// Диалог «Добавить аккаунт»: импорт текущей сессии из GameCenter (без пароля).
+// Диалог «Добавить аккаунт»: импорт сессии из GameCenter или профилей из файла.
 Popup {
     id: dlg
     modal: true
@@ -112,6 +112,34 @@ Popup {
                     }
                 }
             }
+        }
+
+        Column {
+            width: parent.width
+            spacing: Theme.s8
+
+            SecondaryButton {
+                width: parent.width
+                iconName: "folder"
+                text: Strings.importFile
+                enabled: !App.busy
+                onClicked: accountFileDialog.open()
+            }
+            AppText {
+                width: parent.width
+                text: Strings.importFileHint
+                role: "small"; color: Theme.muted; wrapMode: Text.WordWrap
+            }
+        }
+    }
+
+    FileDialog {
+        id: accountFileDialog
+        title: Strings.importFileTitle
+        nameFilters: [Strings.accountFileFilter]
+        onAccepted: {
+            App.importAccountsFromFile(selectedFile)
+            dlg.close()
         }
     }
 

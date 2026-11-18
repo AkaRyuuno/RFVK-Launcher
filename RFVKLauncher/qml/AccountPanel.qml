@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import Rfvk
 
@@ -8,7 +9,9 @@ Item {
     id: panel
     property var acc: App.selectedAccount
     signal deleteRequested()
+    signal exportRequested()
 
+    readonly property bool compactActions: width < 500
     readonly property color avColor: Theme.avatarColor(acc && acc.id ? acc.id : "")
     readonly property color stColor: Theme.statusColor(acc ? acc.sessionState : App.None)
 
@@ -48,7 +51,9 @@ Item {
         switch (acc.sessionState) {
         case App.Active:
             var upd = ago(acc.sessionRefreshed)
-            return "Действует до " + fmt(acc.sessionExpiry) + (upd.length ? " · обновлена " + upd : "")
+            var expiry = fmt(acc.sessionExpiry)
+            return (expiry.length ? "Действует до " + expiry : "Сессия сохранена")
+                + (upd.length ? " · обновлена " + upd : "")
         case App.Expiring: return "Истекает " + until(acc.sessionExpiry) + " — обновите заранее"
         case App.Expired: return "Истекла " + fmt(acc.sessionExpiry) + " — нужен импорт из GameCenter"
         default: return "Сессия не сохранена — нужен импорт из GameCenter"
@@ -87,15 +92,19 @@ Item {
                     spacing: Theme.s4
                     AppText { text: panel.acc ? panel.acc.nick : ""; role: "display"; elide: Text.ElideRight; width: parent.width }
                     Row {
+                        width: parent.width
                         spacing: Theme.s8
                         AppText {
                             anchors.verticalCenter: parent.verticalCenter
+                            width: Math.min(implicitWidth, parent.width - (loginBadge.visible ? loginBadge.width + parent.spacing : 0))
                             text: Strings.loginKindLabel(panel.acc ? panel.acc.loginKind : "") + " · " + (panel.acc ? panel.acc.login : "")
-                            role: "small"; color: Theme.muted
+                            role: "small"; color: Theme.muted; elide: Text.ElideRight
                         }
                         // Пилюля «Вход: <способ>».
                         Rectangle {
+                            id: loginBadge
                             anchors.verticalCenter: parent.verticalCenter
+                            visible: !panel.compactActions
                             height: 20; width: lp.implicitWidth + 2 * Theme.s8; radius: Theme.rBadge
                             color: Theme.raised; border.width: 1; border.color: Theme.border
                             AppText {
@@ -114,9 +123,25 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Theme.s8
                 SecondaryButton {
-                    kind: "outline"; iconName: "refresh"; text: Strings.refresh
+                    width: panel.compactActions ? Theme.hField : implicitWidth
+                    iconName: "refresh"
+                    text: panel.compactActions ? "" : Strings.refresh
+                    Accessible.name: Strings.refresh
+                    ToolTip.visible: hovered && panel.compactActions
+                    ToolTip.delay: 400
+                    ToolTip.text: Strings.refresh
                     enabled: !App.busy
                     onClicked: App.refreshSelected()
+                }
+                SecondaryButton {
+                    width: Theme.hField
+                    iconName: "upload"
+                    Accessible.name: Strings.exportAccounts
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 400
+                    ToolTip.text: Strings.exportAccounts
+                    enabled: !App.busy
+                    onClicked: panel.exportRequested()
                 }
                 // Удаление — компактная кнопка-иконка.
                 Rectangle {

@@ -1,10 +1,13 @@
 #include "StubAuthBackend.h"
+#include "AccountFile.h"
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QTimer>
 
@@ -95,12 +98,73 @@ void StubAuthBackend::importSession()
                 m_accounts[idx] = a;
             else
                 m_accounts.prepend(a);
-            persist();
+            persist(m_accounts);
             emit accountsChanged(m_accounts);
             emit progress(QStringLiteral("Сессия импортирована из GameCenter · ") + a.nick, 1);
             setBusy(false);
             emit finished(true, QStringLiteral("Сессия импортирована из GameCenter · ") + a.nick);
         });
+}
+
+void StubAuthBackend::importAccountsFromFile(const QString &path)
+{
+    setBusy(true);
+    QList<AccountFile::Entry> entries;
+    const QString error = AccountFile::read(path, entries);
+    if (!error.isEmpty()) {
+        finishFileOperation(error, {});
+        return;
+    }
+
+    QVector<Account> next = m_accounts;
+    AccountFile::ImportResult result;
+    for (const AccountFile::Entry &entry : entries) {
+        if (AccountFile::findProfile(next, entry.profile) < 0) {
+            next.append(entry.profile);
+            ++result.added;
+        } else {
+            ++result.skipped;
+        }
+    }
+    if (result.added > 0) {
+        if (!persist(next)) {
+            finishFileOperation(QStringLiteral("Не удалось сохранить импортированные аккаунты"), {});
+            return;
+        }
+        m_accounts = std::move(next);
+        emit accountsChanged(m_accounts);
+    }
+    finishFileOperation({}, result.summary());
+}
+
+void StubAuthBackend::exportAccountsToFile(const QString &path, const QStringList &ids)
+{
+    setBusy(true);
+    if (QFileInfo(path) == QFileInfo(storePath())) {
+        finishFileOperation(QStringLiteral("Выберите отдельный файл для экспорта аккаунтов"), {});
+        return;
+    }
+
+    QList<AccountFile::Entry> entries;
+    for (const QString &id : ids) {
+        const int row = indexOfId(id);
+        if (row >= 0)
+            entries.append({m_accounts.at(row), {}, 0});
+    }
+    finishFileOperation(AccountFile::write(path, entries), AccountFile::exportSummary(entries));
+}
+
+void StubAuthBackend::finishFileOperation(const QString &failure, const QString &summary)
+{
+    if (failure.isEmpty()) {
+        emit progress(summary, 1);
+        emit finished(true, summary);
+    } else {
+        emit progress(failure, 2);
+        emit error(failure);
+        emit finished(false, failure);
+    }
+    setBusy(false);
 }
 
 // ── Запуск игры: сессия -> код -> старт RF_Online.exe ──────────────────────
@@ -142,7 +206,7 @@ void StubAuthBackend::launch(const QString &accountId)
                 emit progress(QStringLiteral("VK Play отклонил сессию «") + a.nick + QStringLiteral("»"), 2);
                 // Сессия признана истёкшей.
                 m_accounts[idx].sessionState = Session::Expired;
-                persist();
+                persist(m_accounts);
                 emit accountsChanged(m_accounts);
                 setBusy(false);
                 emit error(QStringLiteral("VK Play отклонил сессию. Войдите в GameCenter под этим "
@@ -153,7 +217,7 @@ void StubAuthBackend::launch(const QString &accountId)
             // Успех: сессия подтверждена, код получен. Фактический старт
             // клиента RF_Online.exe делает контроллер (у него путь к игре).
             m_accounts[idx].sessionRefreshed = QDateTime::currentDateTime();
-            persist();
+            persist(m_accounts);
             emit accountsChanged(m_accounts);
             emit progress(QStringLiteral("Код запуска получен · ") + a.nick, 1);
             setBusy(false);
@@ -189,7 +253,7 @@ void StubAuthBackend::refreshSession(const QString &accountId)
             if (unauthorized) {
                 emit progress(QStringLiteral("Обновление сессии: HTTP 401 Unauthorized"), 2);
                 m_accounts[idx].sessionState = Session::Expired;
-                persist();
+                persist(m_accounts);
                 emit accountsChanged(m_accounts);
                 setBusy(false);
                 emit error(QStringLiteral("Сессия отклонена. Нужен импорт из GameCenter"));
@@ -199,7 +263,7 @@ void StubAuthBackend::refreshSession(const QString &accountId)
             m_accounts[idx].sessionState = Session::Active;
             m_accounts[idx].sessionExpiry = QDateTime::currentDateTime().addSecs(3600);
             m_accounts[idx].sessionRefreshed = QDateTime::currentDateTime();
-            persist();
+            persist(m_accounts);
             emit accountsChanged(m_accounts);
             emit progress(QStringLiteral("Сессия обновлена · ") + a.nick, 1);
             setBusy(false);
@@ -207,8 +271,8 @@ void StubAuthBackend::refreshSession(const QString &accountId)
         });
 }
 
-// ── Удаление аккаунта (с отзывом сессии на сервере) ─────────────────────────
-void StubAuthBackend::deleteAccount(const QString &accountId)
+// ── Удаление аккаунта ──────────────────────────────────────────────────────
+void StubAuthBackend::deleteAccount(const QString &accountId, bool revokeSession)
 {
     if (m_busy)
         return;
@@ -217,14 +281,14 @@ void StubAuthBackend::deleteAccount(const QString &accountId)
         return;
     const Account a = m_accounts.at(idx);
     setBusy(true);
-    runSteps(
-        {
-            {QStringLiteral("Отзываю сессию в VK Play…"), 0, 550},
-            {QStringLiteral("Удаляю аккаунт из лаунчера…"), 0, 400},
-        },
+    QVector<Step> steps;
+    if (revokeSession)
+        steps.append({QStringLiteral("Отзываю сессию в VK Play…"), 0, 550});
+    steps.append({QStringLiteral("Удаляю аккаунт из лаунчера…"), 0, 400});
+    runSteps(steps,
         [this, idx, a]() {
             m_accounts.removeAt(idx);
-            persist();
+            persist(m_accounts);
             emit accountsChanged(m_accounts);
             emit progress(QStringLiteral("Аккаунт «") + a.nick + QStringLiteral("» удалён из лаунчера"), 1);
             setBusy(false);
@@ -239,10 +303,10 @@ QString StubAuthBackend::storePath() const
     return QDir(dir).filePath(QStringLiteral("accounts.json"));
 }
 
-void StubAuthBackend::persist() const
+bool StubAuthBackend::persist(const QVector<Account> &accounts) const
 {
     QJsonArray arr;
-    for (const Account &a : m_accounts) {
+    for (const Account &a : accounts) {
         QJsonObject o;
         o[QStringLiteral("id")] = a.id;
         o[QStringLiteral("login")] = a.login;
@@ -258,9 +322,9 @@ void StubAuthBackend::persist() const
     }
     const QString path = storePath();
     QDir().mkpath(QFileInfo(path).absolutePath());
-    QFile f(path);
-    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        f.write(QJsonDocument(arr).toJson(QJsonDocument::Indented));
+    const QByteArray data = QJsonDocument(arr).toJson();
+    QSaveFile f(path);
+    return f.open(QIODevice::WriteOnly) && f.write(data) == data.size() && f.commit();
 }
 
 void StubAuthBackend::load()
@@ -340,5 +404,5 @@ void StubAuthBackend::seed()
     d.sessionState = Session::None;
     m_accounts.append(d);
 
-    persist();
+    persist(m_accounts);
 }

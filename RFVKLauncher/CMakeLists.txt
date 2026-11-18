@@ -1,6 +1,7 @@
 qt_add_executable(RFVKLauncher
     src/main.cpp
     src/Account.h
+    src/AccountFile.cpp src/AccountFile.h
     src/AccountModel.cpp src/AccountModel.h
     src/IAuthBackend.h
     src/StubAuthBackend.cpp src/StubAuthBackend.h

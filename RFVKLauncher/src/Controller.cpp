@@ -7,6 +7,7 @@
 #include <QProcess>
 #include <QTime>
 #include <QTimer>
+#include <algorithm>
 
 namespace {
 // «1 аккаунт», «2 аккаунта», «5 аккаунтов».
@@ -71,7 +72,8 @@ Controller::Controller(AccountModel *model, IAuthBackend *backend, QObject *pare
     if (saved.isEmpty()) // совместимость с прежним одиночным выбором
         saved = QStringList{m_settings.value(QStringLiteral("lastLoginId")).toString()};
 
-    m_model->reset(m_backend->accounts());
+    m_accountOrder = m_settings.value(QStringLiteral("accountOrder")).toStringList();
+    m_model->reset(orderedAccounts(m_backend->accounts()));
     connectBackend();
     recomputeGameStatus();
 
@@ -107,7 +109,9 @@ void Controller::connectBackend()
     });
 
     connect(m_backend, &IAuthBackend::accountsChanged, this, [this](const QVector<Account> &items) {
-        m_model->reset(items);
+        m_model->reset(orderedAccounts(items));
+        if (!m_accountOrder.isEmpty())
+            saveAccountOrder();
         // Сохранить выбор по id (исчезнувшие — убрать); пустой — первый аккаунт.
         QStringList keep = inModelOrder(m_selected);
         if (keep.isEmpty() && m_model->rowCount() > 0)
@@ -129,7 +133,7 @@ void Controller::connectBackend()
     connect(m_backend, &IAuthBackend::error, this, [this](const QString &msg) {
         emit toast(msg, 2);
         // Ошибка относится к аккаунту текущей операции — панель покажет баннер.
-        if (m_current.kind != OpKind::Import)
+        if (m_current.targetsAccount())
             setError(m_current.id, msg);
     });
 
@@ -160,6 +164,42 @@ QStringList Controller::inModelOrder(const QStringList &ids) const
         if (ids.contains(a.id))
             out << a.id;
     return out;
+}
+
+QVector<Account> Controller::orderedAccounts(QVector<Account> items) const
+{
+    if (m_accountOrder.isEmpty())
+        return items;
+
+    QHash<QString, qsizetype> position;
+    for (qsizetype i = 0; i < m_accountOrder.size(); ++i)
+        position.insert(m_accountOrder.at(i), i);
+    const qsizetype end = m_accountOrder.size();
+    std::stable_sort(items.begin(), items.end(), [&position, end](const Account &a, const Account &b) {
+        return position.value(a.id, end) < position.value(b.id, end);
+    });
+    return items;
+}
+
+void Controller::saveAccountOrder()
+{
+    QStringList order;
+    for (const Account &account : m_model->items())
+        order.append(account.id);
+    if (order != m_accountOrder) {
+        m_accountOrder = order;
+        m_settings.setValue(QStringLiteral("accountOrder"), order);
+    }
+}
+
+void Controller::moveAccount(const QString &id, const QString &targetId, bool after)
+{
+    if (!m_model->moveAccount(id, targetId, after))
+        return;
+    saveAccountOrder();
+    m_selected = inModelOrder(m_selected);
+    m_settings.setValue(QStringLiteral("selection"), m_selected);
+    emit selectionChanged(); // Мог измениться selectedIndex.
 }
 
 void Controller::setSelection(const QStringList &ids)
@@ -300,9 +340,17 @@ void Controller::dismissError()
 
 // ───────────────────────────── очередь операций ─────────────────────────────
 
-void Controller::enqueue(OpKind kind, const QStringList &ids)
+void Controller::enqueue(OpKind kind, const QStringList &ids, bool revokeSession)
 {
-    if (ids.isEmpty())
+    QList<Op> operations;
+    for (const QString &id : ids)
+        operations.append({kind, id, {}, {}, revokeSession});
+    enqueue(operations);
+}
+
+void Controller::enqueue(const QList<Op> &operations)
+{
+    if (operations.isEmpty())
         return;
     // Новый пакет, если очередь пуста и ничего не выполняется.
     if (!m_inFlight && m_queue.isEmpty()) {
@@ -310,12 +358,12 @@ void Controller::enqueue(OpKind kind, const QStringList &ids)
         m_batchTotal = 0;
         m_batchOk = 0;
     }
-    for (const QString &id : ids)
-        m_queue.append({kind, id});
-    m_batchTotal += ids.size();
+    m_queue.append(operations);
+    m_batchTotal += operations.size();
     if (m_batchTotal > 1) {
-        static const char *verbs[] = {"Импорт", "Запуск", "Обновление сессий", "Удаление"};
-        appendLog(QString::fromUtf8(verbs[int(kind)]) + QStringLiteral(": ") + accountsWord(ids.size()), 0);
+        static const char *verbs[] = {"Импорт", "Запуск", "Обновление сессий", "Удаление", "Импорт из файла", "Экспорт"};
+        appendLog(QString::fromUtf8(verbs[int(operations.first().kind)]) + QStringLiteral(": ")
+                      + accountsWord(operations.size()), 0);
     }
     updateBusy();
     emit progressChanged();
@@ -341,7 +389,7 @@ void Controller::pump()
         const Op op = m_queue.takeFirst();
         ++m_batchIndex;
         // Аккаунт мог исчезнуть (удалён предыдущей операцией) — пропускаем.
-        if (op.kind != OpKind::Import && m_model->indexOfId(op.id) < 0)
+        if (op.targetsAccount() && m_model->indexOfId(op.id) < 0)
             continue;
 
         m_current = op;
@@ -354,9 +402,11 @@ void Controller::pump()
 
         switch (op.kind) {
         case OpKind::Import: m_backend->importSession(); break;
+        case OpKind::ImportFile: m_backend->importAccountsFromFile(op.filePath); break;
+        case OpKind::ExportFile: m_backend->exportAccountsToFile(op.filePath, op.exportIds); break;
         case OpKind::Launch: m_backend->launch(op.id); break;
         case OpKind::Refresh: m_backend->refreshSession(op.id); break;
-        case OpKind::Delete: m_backend->deleteAccount(op.id); break;
+        case OpKind::Delete: m_backend->deleteAccount(op.id, op.revokeSession); break;
         }
         return;
     }
@@ -399,6 +449,25 @@ void Controller::updateBusy()
 void Controller::importSession()
 {
     enqueue(OpKind::Import, {QString()});
+}
+
+void Controller::importAccountsFromFile(const QUrl &file)
+{
+    if (file.isLocalFile())
+        enqueue({{OpKind::ImportFile, {}, file.toLocalFile(), {}}});
+}
+
+void Controller::exportAccountsToFile(const QUrl &file, const QStringList &ids)
+{
+    if (!file.isLocalFile())
+        return;
+
+    const QStringList orderedIds = inModelOrder(ids);
+    if (orderedIds.isEmpty()) {
+        emit toast(QStringLiteral("Нет аккаунтов для экспорта"), 2);
+        return;
+    }
+    enqueue({{OpKind::ExportFile, {}, file.toLocalFile(), orderedIds}});
 }
 
 bool Controller::checkGameDir()
@@ -449,15 +518,15 @@ void Controller::refreshSelected()
     enqueue(OpKind::Refresh, m_selected);
 }
 
-void Controller::deleteAccount(const QString &id)
+void Controller::deleteAccount(const QString &id, bool revokeSession)
 {
     if (!id.isEmpty())
-        enqueue(OpKind::Delete, {id});
+        enqueue(OpKind::Delete, {id}, revokeSession);
 }
 
-void Controller::deleteSelected()
+void Controller::deleteSelected(bool revokeSession)
 {
-    enqueue(OpKind::Delete, m_selected);
+    enqueue(OpKind::Delete, m_selected, revokeSession);
 }
 
 // ───────────────────────────── настройки ────────────────────────────────────

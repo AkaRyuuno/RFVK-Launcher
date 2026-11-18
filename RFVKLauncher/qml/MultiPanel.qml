@@ -3,12 +3,14 @@ import QtQuick.Controls.Basic
 import Rfvk
 
 // Правая зона при нескольких выделенных аккаунтах: сводный заголовок со
-// стопкой аватаров и действиями (обновить / удалить — для всех выделенных),
+// стопкой аватаров и действиями для всех выделенных,
 // сетка мини-карточек выделенных аккаунтов и общая кнопка запуска.
 Item {
     id: panel
     signal deleteRequested()
+    signal exportRequested()
 
+    readonly property bool compactActions: width < 500
     readonly property var accs: App.selectedAccounts
     readonly property int n: accs.length
     // Аккаунты без действующей сессии — запуск для них не удастся.
@@ -98,9 +100,25 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Theme.s8
                 SecondaryButton {
-                    kind: "outline"; iconName: "refresh"; text: Strings.refresh
+                    width: panel.compactActions ? Theme.hField : implicitWidth
+                    iconName: "refresh"
+                    text: panel.compactActions ? "" : Strings.refresh
+                    Accessible.name: Strings.refresh
+                    ToolTip.visible: hovered && panel.compactActions
+                    ToolTip.delay: 400
+                    ToolTip.text: Strings.refresh
                     enabled: !App.busy
                     onClicked: App.refreshSelected()
+                }
+                SecondaryButton {
+                    width: Theme.hField
+                    iconName: "upload"
+                    Accessible.name: Strings.exportAccounts
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 400
+                    ToolTip.text: Strings.exportAccounts
+                    enabled: !App.busy
+                    onClicked: panel.exportRequested()
                 }
                 // Удаление всех выделенных — компактная кнопка-иконка.
                 Rectangle {

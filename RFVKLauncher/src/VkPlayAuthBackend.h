@@ -10,7 +10,7 @@ class VkWorker; // реализация в .cpp (живёт в рабочем п
 // SSO-cookie встроенного Chromium GameCenter (DPAPI + AES-GCM). Сетевые
 // операции идут в рабочем потоке, результаты — сигналами (как у заглушки).
 //
-// Refresh-токены хранятся только здесь (DPAPI), в C++/QML не попадают;
+// Refresh-токены обрабатываются в бэкенде и хранятся локально под DPAPI.
 // фактический старт RF_Online.exe делает контроллер по сигналу readyToLaunch.
 class VkPlayAuthBackend : public IAuthBackend {
     Q_OBJECT
@@ -19,9 +19,11 @@ public:
     ~VkPlayAuthBackend() override;
 
     void importSession() override;
+    void importAccountsFromFile(const QString &path) override;
+    void exportAccountsToFile(const QString &path, const QStringList &ids) override;
     void launch(const QString &accountId) override;
     void refreshSession(const QString &accountId) override;
-    void deleteAccount(const QString &accountId) override;
+    void deleteAccount(const QString &accountId, bool revokeSession) override;
     QVector<Account> accounts() const override { return m_accounts; }
     void setGameDir(const QString &dir) override;
 

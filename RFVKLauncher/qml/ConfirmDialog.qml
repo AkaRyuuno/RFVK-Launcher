@@ -10,13 +10,14 @@ Popup {
     property string accLogin: ""
     property int count: 1          // сколько аккаунтов удаляем
     property string names: ""      // ники через запятую (для нескольких)
-    signal confirmed()
+    signal confirmed(bool revokeSession)
 
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: Theme.s24
     width: 400
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    onAboutToShow: revokeToggle.checked = false
 
     Overlay.modal: Rectangle { color: Qt.rgba(0, 0, 0, 0.5) }
 
@@ -47,12 +48,27 @@ Popup {
             wrapMode: Text.WordWrap
             role: "small"
             color: Theme.muted
-            text: dlg.count > 1
-                  ? "Из лаунчера будут удалены сохранённые сессии: " + dlg.names
-                    + ". Сами аккаунты VK Play и игровые персонажи не пострадают."
-                  : "Из лаунчера будет удалена сохранённая сессия для "
-                    + Strings.loginKindLabel(dlg.accKind) + " · " + dlg.accLogin
-                    + ". Сам аккаунт VK Play и игровые персонажи не пострадают."
+            text: dlg.count > 1 ? "Из лаунчера будут удалены записи: " + dlg.names
+                                : "Из лаунчера будет удалена запись для "
+                                  + Strings.loginKindLabel(dlg.accKind) + " · " + dlg.accLogin + "."
+        }
+
+        Column {
+            width: parent.width
+            spacing: Theme.s4
+            CheckBox {
+                id: revokeToggle
+                text: Strings.revokeDeletedSession
+                palette.windowText: Theme.text
+                palette.highlight: Theme.accent
+            }
+            AppText {
+                width: parent.width
+                text: Strings.revokeDeletedSessionHint
+                role: "small"
+                color: Theme.muted
+                wrapMode: Text.WordWrap
+            }
         }
 
         // Кнопки — обе справа.
@@ -64,7 +80,10 @@ Popup {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Theme.s8
                 SecondaryButton { kind: "raised"; text: Strings.cancel; onClicked: dlg.close() }
-                SecondaryButton { kind: "danger"; iconName: "trash"; text: Strings.confirmDeleteYes; onClicked: { dlg.confirmed(); dlg.close() } }
+                SecondaryButton {
+                    kind: "danger"; iconName: "trash"; text: Strings.confirmDeleteYes
+                    onClicked: { dlg.confirmed(revokeToggle.checked); dlg.close() }
+                }
             }
         }
     }

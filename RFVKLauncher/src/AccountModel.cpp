@@ -65,6 +65,21 @@ void AccountModel::reset(const QVector<Account> &items)
     endResetModel();
 }
 
+bool AccountModel::moveAccount(const QString &id, const QString &targetId, bool after)
+{
+    const int from = indexOfId(id);
+    const int target = indexOfId(targetId);
+    if (from < 0 || target < 0 || from == target)
+        return false;
+
+    const int destination = target + (after ? 1 : 0);
+    if (!beginMoveRows({}, from, from, {}, destination))
+        return false;
+    m_items.move(from, destination > from ? destination - 1 : destination);
+    endMoveRows();
+    return true;
+}
+
 int AccountModel::indexOfId(const QString &id) const
 {
     for (int i = 0; i < m_items.size(); ++i)

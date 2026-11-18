@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import Rfvk
 
@@ -217,6 +218,8 @@ Window {
                 Layout.preferredWidth: win.compact ? 248 : Theme.sidebarW
                 compact: win.compact
                 onAddRequested: addDlg.open()
+                onExportRequested: openAccountExport()
+                onDeleteRequested: confirmDelete()
             }
 
             SplitView {
@@ -376,12 +379,14 @@ Window {
         id: panelComp
         AccountPanel {
             onDeleteRequested: confirmDelete()
+            onExportRequested: openAccountExport()
         }
     }
     Component {
         id: multiComp
         MultiPanel {
             onDeleteRequested: confirmDelete()
+            onExportRequested: openAccountExport()
         }
     }
     Component {
@@ -404,6 +409,22 @@ Window {
     }
 
     AddAccountDialog { id: addDlg }
+    function openAccountExport() {
+        exportDlg.accountIds = Array.from(App.selectedIds)
+        if (exportDlg.accountIds.length > 0)
+            exportDlg.open()
+    }
+
+    FileDialog {
+        id: exportDlg
+        property var accountIds: []
+        title: Strings.exportFileTitle
+        fileMode: FileDialog.SaveFile
+        nameFilters: [Strings.accountFileFilter]
+        defaultSuffix: "json"
+        onAccepted: App.exportAccountsToFile(selectedFile, accountIds)
+    }
+
     SettingsDialog { id: settingsDlg }
     AddProxyDialog { id: addProxyDlg }
     AddSourceDialog { id: addSourceDlg }
@@ -489,7 +510,7 @@ Window {
         else if (StartupOpen === "addproxyauth") { win.activeTab = "proxies"; addProxyDlg.openAdd(true) }
         else if (StartupOpen === "addsource") { win.activeTab = "proxies"; addSourceDlg.openAdd() }
         else if (StartupOpen === "delete") confirmDelete()
-        else if (StartupOpen === "deleteconfirm") App.deleteSelected()
+        else if (StartupOpen === "deleteconfirm") App.deleteSelected(false)
         else if (StartupOpen === "import") App.importSession()
         else if (StartupOpen === "launch") App.launchSelected()
         else if (StartupOpen === "refresh") App.refreshSelected()
@@ -497,7 +518,7 @@ Window {
 
     ConfirmDialog {
         id: confirmDlg
-        onConfirmed: App.deleteSelected()
+        onConfirmed: revokeSession => App.deleteSelected(revokeSession)
     }
 
     Toasts {}

@@ -19,6 +19,7 @@ Rectangle {
     // modifiers — Qt.ControlModifier / Qt.ShiftModifier (мультивыбор).
     signal clicked(int modifiers)
     signal activated() // двойной клик — запуск под этим аккаунтом
+    signal contextRequested(real x, real y)
 
     readonly property color avColor: Theme.avatarColor(accId)
 
@@ -33,10 +34,18 @@ Rectangle {
         id: area
         anchors.fill: parent
         hoverEnabled: true
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
         cursorShape: Qt.PointingHandCursor
-        onClicked: (mouse) => card.clicked(mouse.modifiers)
+        onClicked: (mouse) => {
+            if (mouse.button === Qt.RightButton)
+                card.contextRequested(mouse.x, mouse.y)
+            else
+                card.clicked(mouse.modifiers)
+        }
         onDoubleClicked: (mouse) => {
-            if (!(mouse.modifiers & (Qt.ControlModifier | Qt.ShiftModifier)))
+            if (mouse.button === Qt.RightButton)
+                mouse.accepted = false
+            else if (!(mouse.modifiers & (Qt.ControlModifier | Qt.ShiftModifier)))
                 card.activated()
         }
     }
