@@ -29,6 +29,10 @@ constexpr int kFetchTimeoutMs = 30000;
 constexpr int kBulkParallel = 256;
 constexpr int kBulkTimeoutMs = 10000;
 constexpr int kBulkConnectTimeoutMs = 4000;
+// Бесплатные прокси часто перегружены и принимают лишь часть подключений:
+// одна удачная проверка ничего не гарантирует. Рабочий — только тот, кто
+// прошёл проверку столько раз подряд.
+constexpr int kBulkPasses = 3;
 constexpr int kCacheVersion = 1;
 
 const QString kSourcesKey = QStringLiteral("proxy/sources");
@@ -411,7 +415,16 @@ void ProxyManager::pumpChecks()
             if (row >= 0) {
                 ProxySource &src = m_sources.ref(row);
                 if (src.checkGen == job.gen && job.index < src.entries.size()) {
-                    setEntryState(src, src.entries[job.index], ok, pingMs);
+                    if (ok && job.pass < kBulkPasses) {
+                        // Повторить сразу, вне очереди; итог — после последней проверки.
+                        CheckJob next = job;
+                        ++next.pass;
+                        next.worstPing = qMax(job.worstPing, pingMs);
+                        m_checkQueue.prepend(next);
+                        pumpChecks();
+                        return;
+                    }
+                    setEntryState(src, src.entries[job.index], ok, qMax(job.worstPing, pingMs));
                     if (++src.checkDone >= src.checkTotal)
                         finishCheck(row, QStringLiteral("Проверено: %1 · рабочих: %2")
                                              .arg(src.checkTotal).arg(src.okCount));

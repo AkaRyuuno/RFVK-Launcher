@@ -176,6 +176,8 @@ private:
         QString sourceId;
         int gen = 0;
         int index = 0;
+        int pass = 1;         // номер проверки подряд (рабочим адрес становится после kBulkPasses)
+        int worstPing = -1;
     };
 
     ProxyModel m_model;
