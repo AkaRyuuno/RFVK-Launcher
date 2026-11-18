@@ -156,7 +156,7 @@ QtObject {
     readonly property string tabAccounts: "Аккаунты"
     readonly property string tabProxies: "Прокси и слоты"
     readonly property string proxiesTitle: "Слоты маршрутизации"
-    readonly property string proxiesSubtitle: "До 5 клиентов игры на каждый слот (прямой IP или прокси). При закрытии окна слот освобождается автоматически."
+    readonly property string proxiesSubtitle: "До 5 клиентов игры на каждый слот (прямой IP или прокси). Авто-выбор: прямой IP, затем прокси, добавленные вручную, затем проверенные прокси из источников."
     readonly property string addProxy: "Добавить прокси"
     readonly property string editProxy: "Настройки прокси"
     readonly property string proxyDirectDesc: "Локальный IP сетевого адаптера компьютера"
@@ -197,10 +197,38 @@ QtObject {
     readonly property string proxyDeleteConfirmBody: "Прокси будет удалён из лаунчера. Аккаунты с этим слотом переключатся на авто-выбор."
     readonly property string slotSelectorLabel: "Слот маршрутизации"
     readonly property string slotSelectorHint: "Через какой IP запускать этот аккаунт (до 5 окон на слот)"
-    readonly property string slotAuto: "Авто (прямой IP или свободный прокси)"
+    readonly property string slotAuto: "Авто (прямой IP, свободный прокси или источник)"
     readonly property string slotLoad: "Занятость слота"
     readonly property string slotPids: "Клиенты (PID):"
     readonly property string slotNoClients: "Окна игры не запущены"
     readonly property string slotFull: "Лимит исчерпан"
     function slotCapacityText(cur, max) { return cur + "/" + max + " окон" }
+
+    // ── Источники прокси (списки по URL) ──
+    readonly property string addSource: "Добавить источник по URL"
+    readonly property string editSource: "Настройки источника"
+    readonly property string sourcesTitle: "Источники прокси"
+    readonly property string sourcesSubtitle: "Списки по ссылке: каждый адрес проверяется через сервер игры, в игру выдаются только рабочие."
+    readonly property string sourceUrl: "Ссылка на список"
+    readonly property string sourceUrlHint: "https://example.com/proxies/socks5/data.txt"
+    readonly property string sourceUrlDesc: "Текстовый файл, один прокси на строку: socks5://host:port, http://user:pass@host:port или host:port"
+    readonly property string sourceNameHint: "Например: proxifly SOCKS5"
+    readonly property string sourceDefaultType: "Протокол строк без схемы"
+    readonly property string sourceAdd: "Добавить и проверить"
+    readonly property string sourceBadUrl: "Укажите ссылку http:// или https://"
+    readonly property string sourceRefresh: "Скачать список заново"
+    readonly property string sourceCheck: "Проверить все адреса"
+    readonly property string sourceStop: "Остановить проверку"
+    readonly property string sourceFetching: "Загрузка списка…"
+    function sourceTotal(n) { return "Адресов: " + n }
+    function sourceOk(n) { return "Рабочих: " + n }
+    function sourceBad(n) { return "Нерабочих: " + n }
+    function sourceUnchecked(n) { return "Не проверено: " + n }
+    function sourceInUse(clients, proxies) { return "В игре: " + clients + " окон на " + proxies + " адресах" }
+    function sourceProgress(done, total) { return "Проверка " + done + " / " + total }
+    function sourceFetchedAt(t) { return "Список от " + t }
+    readonly property string sourceDeleteConfirmTitle: "Удалить источник?"
+    readonly property string sourceDeleteConfirmBody: "Список и статусы его адресов будут удалены. Добавленные вручную прокси не затрагиваются."
+    function slotFromSource(name) { return "Из источника «" + name + "»" }
+    readonly property string slotFromSourceHint: "Выдан автоматически · исчезнет, когда закроется последнее окно"
 }

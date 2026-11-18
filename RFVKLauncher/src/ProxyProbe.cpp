@@ -3,7 +3,6 @@
 #include <QtEndian>
 
 namespace {
-constexpr int kTimeoutMs = 15000; // как дедлайн рукопожатия в rfvk_proxy.dll
 constexpr int kMaxHttpHeader = 8192;
 
 QString socksReply(quint8 rep)
@@ -21,14 +20,15 @@ QString socksReply(quint8 rep)
 } // namespace
 
 ProxyProbe::ProxyProbe(const ProxySlot &proxy, const QHostAddress &target, quint16 targetPort,
-                       QObject *parent)
-    : QObject(parent), m_proxy(proxy), m_target(target), m_targetPort(targetPort)
+                       QObject *parent, int timeoutMs, int connectTimeoutMs)
+    : QObject(parent), m_proxy(proxy), m_target(target), m_targetPort(targetPort), m_timeoutMs(timeoutMs),
+      m_connectTimeoutMs(connectTimeoutMs > 0 ? qMin(connectTimeoutMs, timeoutMs) : timeoutMs)
 {
     m_timeout.setSingleShot(true);
     connect(&m_timeout, &QTimer::timeout, this, [this] {
         finish(false, m_step == Step::Connecting      ? QStringLiteral("прокси не отвечает")
                       : m_step == Step::SocksConnect || m_step == Step::HttpStatus
-                          ? QStringLiteral("прокси не соединился с сервером игры за %1 с").arg(kTimeoutMs / 1000)
+                          ? QStringLiteral("прокси не соединился с сервером игры за %1 с").arg(m_timeoutMs / 1000)
                           : QStringLiteral("прокси не ответил на вход"));
     });
     connect(&m_socket, &QTcpSocket::connected, this, &ProxyProbe::onConnected);
@@ -42,13 +42,14 @@ ProxyProbe::ProxyProbe(const ProxySlot &proxy, const QHostAddress &target, quint
 void ProxyProbe::start()
 {
     m_clock.start();
-    m_timeout.start(kTimeoutMs);
+    m_timeout.start(m_connectTimeoutMs);
     m_socket.connectToHost(m_proxy.host, m_proxy.port);
 }
 
 void ProxyProbe::onConnected()
 {
     m_pingMs = static_cast<int>(m_clock.elapsed());
+    m_timeout.start(qMax(1, m_timeoutMs - m_pingMs)); // остаток общего дедлайна
     const bool withAuth = m_proxy.authEnabled && !m_proxy.username.isEmpty();
     if (m_proxy.type == ProxySlot::Type::Socks5) {
         m_step = Step::SocksMethod;

@@ -4,10 +4,13 @@ import QtQuick.Layouts
 import Rfvk
 
 // Карточка слота маршрутизации (Direct или Proxy) с индикатором вместимости (X/5 окон),
-// пингом, списком активных PIDs и кнопками управления.
+// пингом, списком активных PIDs и кнопками управления. Прокси, выданный из
+// источника, не редактируется: карточка показывает только адрес, источник и
+// занятость.
 Rectangle {
     id: card
     readonly property var pids: (model && typeof model.activePids !== "undefined") ? model.activePids : []
+    readonly property bool fromSource: model.sourceId.length > 0
     signal editRequested(var slot)
     signal deleteRequested(string slotId, string slotName)
 
@@ -85,6 +88,23 @@ Rectangle {
                             color: Theme.muted
                         }
                     }
+                    // Бейдж источника
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: 18
+                        width: srcText.implicitWidth + Theme.s12
+                        radius: Theme.rBadge
+                        color: Theme.badgeFill(Theme.accent)
+                        visible: card.fromSource
+                        AppText {
+                            id: srcText
+                            anchors.centerIn: parent
+                            text: Strings.slotFromSource(model.sourceName)
+                            role: "caption"
+                            font.weight: Font.DemiBold
+                            color: Theme.accent
+                        }
+                    }
                     // Бейдж авторизации
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
@@ -106,6 +126,7 @@ Rectangle {
 
                 AppText {
                     text: model.isDirect ? Strings.proxyDirectDesc
+                        : card.fromSource ? Strings.slotFromSourceHint
                         : (model.host + ":" + model.port + (model.authEnabled && model.username.length > 0 ? " · " + model.username : ""))
                     role: "small"
                     color: Theme.muted
@@ -165,11 +186,11 @@ Rectangle {
                 }
             }
 
-            // Кнопки управления (только для добавленных прокси)
+            // Кнопки управления (только для прокси, добавленных вручную)
             Row {
                 Layout.alignment: Qt.AlignVCenter
                 spacing: Theme.s8
-                visible: !model.isDirect
+                visible: !model.isDirect && !card.fromSource
 
                 // Вкл/Выкл переключатель
                 AppToggle {

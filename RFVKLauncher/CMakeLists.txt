@@ -16,7 +16,9 @@ qt_add_executable(RFVKLauncher
     src/ProxySlot.h
     src/ProxyModel.cpp src/ProxyModel.h
     src/ProxyProbe.cpp src/ProxyProbe.h
-    src/ProxyManager.cpp src/ProxyManager.h
+    src/ProxySource.cpp src/ProxySource.h
+    src/ProxySourceModel.cpp src/ProxySourceModel.h
+    src/ProxyManager.cpp src/ProxyManagerSources.cpp src/ProxyManager.h
     src/Controller.cpp src/Controller.h
 )
 
@@ -54,6 +56,8 @@ qt_add_qml_module(RFVKLauncher
         qml/ProxyCard.qml
         qml/ProxyPanel.qml
         qml/AddProxyDialog.qml
+        qml/ProxySourceCard.qml
+        qml/AddSourceDialog.qml
     RESOURCES
         resources/app.png
         resources/fonts/Exo2-Variable.ttf

@@ -5,6 +5,9 @@
 // работающих клиентов игры (ограничение сервера игры на 1 IP).
 // Слот «direct» всегда существует и представляет прямое подключение
 // через локальный сетевой адаптер игрока; остальные — SOCKS5 или HTTP CONNECT.
+// Слот из источника (sourceId не пуст) создаётся, когда клиенту выдан прокси
+// из списка по URL, и исчезает, когда закрыто последнее его окно; в
+// настройки он не сохраняется и не редактируется.
 
 #include "rfvk_proxy_shared.h"
 
@@ -30,6 +33,8 @@ struct ProxySlot {
     bool testOk = true;         // итог последней проверки (false — ошибка)
     QString lastStatus;         // строка состояния для карточки
     bool enabled = true;        // участвует ли в авто-распределении
+    QString sourceId;           // источник прокси (пусто — добавлен вручную)
+    QString sourceName;
 
     static QString directId() { return QStringLiteral("direct"); }
 
@@ -42,6 +47,7 @@ struct ProxySlot {
     int activeClients() const { return static_cast<int>(activePids.size()); }
     bool isFull() const { return activeClients() >= kMaxClientsPerSlot; }
     bool isDirect() const { return id == directId(); }
+    bool isFromSource() const { return !sourceId.isEmpty(); }
 
     QString capacityString() const
     {

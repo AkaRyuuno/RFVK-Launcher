@@ -73,6 +73,7 @@ ProxyManager::ProxyManager(QObject *parent)
                  QStringLiteral("RFVKLauncher"))
 {
     loadSettings();
+    loadSources();
     if (!parseTarget(m_settings.value(kProbeKey).toString(), m_probeTarget, m_probePort))
         parseTarget(kDefaultProbeTarget, m_probeTarget, m_probePort);
     m_pollTimer.setInterval(kPollMs);
@@ -84,6 +85,10 @@ ProxyManager::~ProxyManager()
 #ifdef Q_OS_WIN
     // Клиенты продолжают работать: библиотека держит общую память сама.
     // Модель и сигналы не трогаем — интерфейс к этому моменту уже разрушен.
+    for (int row = 0; row < m_sources.items().size(); ++row) {
+        if (m_sources.at(row).cacheDirty)
+            saveSourceCache(m_sources.ref(row));
+    }
     for (const Session &s : std::as_const(m_sessions)) {
         if (s.view)
             UnmapViewOfFile(s.view);
@@ -131,7 +136,7 @@ void ProxyManager::saveSettings()
 {
     QJsonArray arr;
     for (const ProxySlot &s : m_model.slotItems()) {
-        if (s.isDirect())
+        if (s.isDirect() || s.isFromSource())
             continue;
         QJsonObject obj = s.toJson();
         if (s.authEnabled && !s.password.isEmpty())
@@ -177,6 +182,11 @@ int ProxyManager::availableSlotsCount() const
         if (s.enabled && !s.isFull())
             ++count;
     }
+    // Проверенные адреса источников, ещё не выданные клиентам.
+    for (const ProxySource &src : m_sources.items()) {
+        if (src.enabled)
+            count += qMax(0, src.okCount - src.inUseProxies);
+    }
     return count;
 }
 
@@ -184,12 +194,21 @@ QVariantList ProxyManager::slotOptions() const
 {
     QVariantList list;
     for (const ProxySlot &s : m_model.slotItems()) {
+        if (s.isFromSource())
+            continue; // временный слот — аккаунт привязывается к источнику целиком
         QString label = QStringLiteral("%1 (%2) [%3]").arg(s.name, s.typeName(), s.capacityString());
         if (s.isFull())
             label += QStringLiteral(" — заполнен");
         else if (!s.enabled)
             label += QStringLiteral(" — выключен");
         list.append(QVariantMap{{QStringLiteral("label"), label}, {QStringLiteral("value"), s.id}});
+    }
+    for (const ProxySource &src : m_sources.items()) {
+        QString label = QStringLiteral("Источник «%1» [рабочих: %2]").arg(src.name).arg(src.okCount);
+        if (!src.enabled)
+            label += QStringLiteral(" — выключен");
+        list.append(QVariantMap{{QStringLiteral("label"), label},
+                                {QStringLiteral("value"), QStringLiteral("source:") + src.id}});
     }
     return list;
 }
@@ -213,7 +232,13 @@ void ProxyManager::setAccountPreferredSlot(const QString &accountId, const QStri
 
 QString ProxyManager::allocateSlot(const QString &preferredSlotId) const
 {
-    if (!preferredSlotId.isEmpty() && preferredSlotId != QLatin1String("auto")) {
+    if (preferredSlotId.startsWith(QLatin1String("source:"))) {
+        const int row = m_sources.indexOfId(preferredSlotId.mid(7));
+        if (row >= 0) {
+            if (const QString id = allocateFromSource(m_sources.at(row)); !id.isEmpty())
+                return id;
+        }
+    } else if (!preferredSlotId.isEmpty() && preferredSlotId != QLatin1String("auto")) {
         const int idx = m_model.indexOfId(preferredSlotId);
         if (idx >= 0) {
             const ProxySlot &s = m_model.at(idx);
@@ -223,8 +248,13 @@ QString ProxyManager::allocateSlot(const QString &preferredSlotId) const
     }
     for (const ProxySlot &s : m_model.slotItems()) {
         // Порядок модели: прямой IP первым, затем прокси в порядке добавления.
-        if (s.enabled && !s.isFull())
+        // Слоты источников добивает allocateFromSource().
+        if (!s.isFromSource() && s.enabled && !s.isFull())
             return s.id;
+    }
+    for (const ProxySource &src : m_sources.items()) {
+        if (const QString id = allocateFromSource(src); !id.isEmpty())
+            return id;
     }
     return {};
 }
@@ -263,7 +293,7 @@ bool ProxyManager::updateProxy(const QString &id, const QString &name, int type,
                                int port, bool auth, const QString &user, const QString &pass)
 {
     const int idx = m_model.indexOfId(id);
-    if (idx < 0 || m_model.at(idx).isDirect())
+    if (idx < 0 || m_model.at(idx).isDirect() || m_model.at(idx).isFromSource())
         return false;
 
     ProxySlot s = m_model.at(idx);
@@ -302,7 +332,7 @@ bool ProxyManager::updateProxy(const QString &id, const QString &name, int type,
 void ProxyManager::removeProxy(const QString &id)
 {
     const int idx = m_model.indexOfId(id);
-    if (idx < 0 || m_model.at(idx).isDirect())
+    if (idx < 0 || m_model.at(idx).isDirect() || m_model.at(idx).isFromSource())
         return;
 
     const ProxySlot s = m_model.at(idx);
@@ -320,7 +350,7 @@ void ProxyManager::removeProxy(const QString &id)
 void ProxyManager::setProxyEnabled(const QString &id, bool enabled)
 {
     const int idx = m_model.indexOfId(id);
-    if (idx < 0 || m_model.at(idx).isDirect())
+    if (idx < 0 || m_model.at(idx).isDirect() || m_model.at(idx).isFromSource())
         return;
     ProxySlot s = m_model.at(idx);
     if (s.enabled == enabled)
@@ -398,9 +428,19 @@ bool ProxyManager::registerProcess(qint64 pid, const QString &slotId, const QStr
 {
 #ifdef Q_OS_WIN
     const int idx = m_model.indexOfId(slotId);
-    if (pid <= 0 || idx < 0 || m_sessions.contains(pid))
+    // Прокси из источника становится слотом с первым своим окном.
+    ProxySlot slot = idx >= 0 ? m_model.at(idx) : makeSourceSlot(slotId);
+    if (pid <= 0 || slot.id.isEmpty() || m_sessions.contains(pid)) {
+        if (slot.id.isEmpty() && pid > 0 && slotId != ProxySlot::directId()) {
+            // Адрес пропал из источника между выбором и запуском — без прокси не играем.
+            if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid))) {
+                TerminateProcess(h, 1);
+                CloseHandle(h);
+            }
+            emit log(QStringLiteral("Клиент %1 закрыт: прокси из источника больше недоступен").arg(nick), 2);
+        }
         return false;
-    ProxySlot slot = m_model.at(idx);
+    }
 
     Session sess;
     sess.pid = pid;
@@ -473,15 +513,23 @@ bool ProxyManager::registerProcess(qint64 pid, const QString &slotId, const QStr
     }
 
     slot.activePids.append(pid);
-    m_model.updateSlot(idx, slot);
+    if (idx >= 0)
+        m_model.updateSlot(idx, slot);
+    else
+        m_model.addSlot(slot);
     m_sessions.insert(pid, sess);
+    updateSourceUsage();
     m_pollTimer.start();
     emit slotsChanged();
 
     if (slot.isDirect()) {
         emit log(QStringLiteral("%1 · прямой IP · слот «%2»: %3").arg(nick, slot.name, slot.capacityString()), 0);
     } else {
-        emit log(QStringLiteral("%1 · подключаю прокси «%2» (%3:%4)…").arg(nick, slot.name, slot.host).arg(slot.port), 0);
+        const QString from = slot.isFromSource()
+            ? QStringLiteral(" из источника «%1» [%2]").arg(slot.sourceName, slot.capacityString())
+            : QString();
+        emit log(QStringLiteral("%1 · подключаю прокси «%2» (%3:%4)%5…")
+                     .arg(nick, slot.name, slot.host).arg(slot.port).arg(from), 0);
         startInject(pid);
     }
     return true;
@@ -620,6 +668,8 @@ void ProxyManager::setSlotHealth(const QString &slotId, bool ok, int pingMs, con
         s.pingMs = pingMs;
     s.lastStatus = status;
     m_model.updateSlot(row, s);
+    if (s.isFromSource())
+        setSourceEntryHealth(s, ok, pingMs);
 }
 
 void ProxyManager::failSession(qint64 pid, const QString &reason)
@@ -659,7 +709,12 @@ void ProxyManager::endSession(qint64 pid)
     if (idx >= 0) {
         ProxySlot slot = m_model.at(idx);
         if (slot.activePids.removeAll(pid) > 0) {
-            m_model.updateSlot(idx, slot);
+            // Слот источника живёт, пока через него запущено хоть одно окно.
+            if (slot.isFromSource() && slot.activeClients() == 0)
+                m_model.removeSlot(idx);
+            else
+                m_model.updateSlot(idx, slot);
+            updateSourceUsage();
             emit slotsChanged();
         }
     }

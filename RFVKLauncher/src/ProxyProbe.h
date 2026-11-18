@@ -17,8 +17,13 @@
 class ProxyProbe : public QObject {
     Q_OBJECT
 public:
+    // Дедлайн всей проверки — как у рукопожатия в rfvk_proxy.dll.
+    static constexpr int kDefaultTimeoutMs = 15000;
+
     ProxyProbe(const ProxySlot &proxy, const QHostAddress &target, quint16 targetPort,
-               QObject *parent = nullptr);
+               QObject *parent = nullptr, int timeoutMs = kDefaultTimeoutMs, int connectTimeoutMs = 0);
+    // connectTimeoutMs > 0 — отдельный, более короткий дедлайн TCP-подключения
+    // к самому прокси (мёртвые адреса массовой проверки отсеиваются быстрее).
     void start();
 
 signals:
@@ -42,4 +47,6 @@ private:
     QByteArray m_buf;
     Step m_step = Step::Connecting;
     int m_pingMs = -1;
+    int m_timeoutMs;
+    int m_connectTimeoutMs;
 };

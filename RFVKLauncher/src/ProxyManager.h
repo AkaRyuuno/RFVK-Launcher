@@ -1,5 +1,6 @@
 #pragma once
 #include "ProxyModel.h"
+#include "ProxySourceModel.h"
 
 #include <QElapsedTimer>
 #include <QHash>
@@ -11,6 +12,8 @@
 
 #include <functional>
 #include <memory>
+
+class QNetworkAccessManager;
 
 namespace remote_load {
 class Job;
@@ -29,14 +32,21 @@ struct Result;
 // прямых соединений до них не было. Не загрузилась, перехват не встал, клиент
 // успел соединиться напрямую или подтверждение не пришло за kConfirmTimeoutMs —
 // лаунчер закрывает клиент, чтобы тот не играл с реального IP.
+//
+// Источники — списки прокси по URL (ProxySource): загружаются, проверяются
+// пачкой (ProxyProbe, CONNECT к серверу игры) и дают прокси для авто-выбора,
+// когда прямой IP и добавленные вручную прокси заполнены. Выданный прокси из
+// источника становится временным слотом (до 5 окон на адрес) и исчезает
+// с закрытием последнего окна.
 class ProxyManager : public QObject {
     Q_OBJECT
     Q_PROPERTY(ProxyModel *model READ model CONSTANT)
+    Q_PROPERTY(ProxySourceModel *sources READ sources CONSTANT)
     Q_PROPERTY(int totalActiveClients READ totalActiveClients NOTIFY slotsChanged)
     Q_PROPERTY(int availableSlotsCount READ availableSlotsCount NOTIFY slotsChanged)
     Q_PROPERTY(bool proxyDllAvailable READ proxyDllAvailable CONSTANT)
     // Слоты для выпадающего списка: [{label, value}] без пункта «Авто» (его
-    // добавляет интерфейс).
+    // добавляет интерфейс). Источники — значения "source:<id>".
     Q_PROPERTY(QVariantList slotOptions READ slotOptions NOTIFY slotsChanged)
 
 public:
@@ -44,6 +54,7 @@ public:
     ~ProxyManager() override;
 
     ProxyModel *model() { return &m_model; }
+    ProxySourceModel *sources() { return &m_sources; }
 
     int totalActiveClients() const;
     int availableSlotsCount() const;
@@ -53,9 +64,11 @@ public:
     static bool proxyDllAvailable();
 
     // Слот для нового клиента. preferredSlotId — слот из настроек аккаунта
-    // ("auto" или пусто — авто): берётся, если он есть, включён и не заполнен.
-    // Авто — прямой IP, пока в нём есть место, затем первый свободный прокси.
-    // Все заняты — пустая строка.
+    // ("auto" или пусто — авто): берётся, если он есть, включён и не заполнен;
+    // "source:<id>" — только прокси этого источника. Авто — прямой IP, пока в
+    // нём есть место, затем первый свободный прокси, затем источники. Все
+    // заняты — пустая строка. Прокси из источника становится слотом в
+    // registerProcess().
     Q_INVOKABLE QString allocateSlot(const QString &preferredSlotId = QString()) const;
 
     // Привязка аккаунта к слоту (в настройках; "auto" — авто-выбор).
@@ -79,6 +92,18 @@ public:
     Q_INVOKABLE void testCustomProxy(int type, const QString &host, int port, bool auth,
                                      const QString &user, const QString &pass,
                                      const QString &existingId = QString());
+
+    // Источники. defaultType — протокол строк без схемы (1 — SOCKS5, 2 — HTTP).
+    // Добавленный источник сразу загружается и проверяется.
+    Q_INVOKABLE QString addSource(const QString &name, const QString &url, int defaultType);
+    Q_INVOKABLE bool updateSource(const QString &id, const QString &name, const QString &url, int defaultType);
+    Q_INVOKABLE void removeSource(const QString &id);
+    Q_INVOKABLE void setSourceEnabled(const QString &id, bool enabled);
+    // Скачать список заново (статусы совпавших адресов сохраняются) и проверить.
+    Q_INVOKABLE void refreshSource(const QString &id);
+    // Проверить все адреса источника; повторный вызов во время проверки — стоп.
+    Q_INVOKABLE void checkSource(const QString &id);
+    Q_INVOKABLE void stopSourceCheck(const QString &id);
 
     // Учесть запущенный клиент в слоте; для прокси — общая память и
     // rfvk_proxy.dll. false — клиент не учтён (для прокси он уже закрыт),
@@ -109,6 +134,27 @@ private:
 
     void loadSettings();
     void saveSettings();
+    void loadSources();
+    void saveSources();
+    QString sourceCachePath(const QString &id) const;
+    void loadSourceCache(ProxySource &src) const;
+    void saveSourceCache(ProxySource &src) const;
+    void setSourceStatus(int row, const QString &text, bool error);
+    static QString validateSource(const QString &url, int defaultType);
+    QNetworkAccessManager *nam();
+    void startFetch(int row, bool checkAfter);
+    void startCheck(int row, bool onlyUnchecked);
+    void pumpChecks();
+    void finishCheck(int row, const QString &summary);
+    // Прокси из источника для клиента: свободный слот этого источника или
+    // проверенный адрес с лучшим пингом. Пусто — нет подходящих.
+    QString allocateFromSource(const ProxySource &src) const;
+    static QString sourceSlotId(const QString &sourceId, const SourceEntry &e);
+    // Слот для id из allocateFromSource(); пустой id — адреса уже нет.
+    ProxySlot makeSourceSlot(const QString &slotId) const;
+    void updateSourceUsage();
+    // Итог туннеля или проверки слота из источника — в запись источника.
+    void setSourceEntryHealth(const ProxySlot &slot, bool ok, int pingMs);
     // Пусто — данные прокси годятся; иначе текст ошибки для пользователя.
     static QString validate(int type, const QString &host, int port, bool auth,
                             const QString &user, const QString &pass);
@@ -126,7 +172,17 @@ private:
     QString slotName(const QString &slotId) const;
     void runProbe(const ProxySlot &proxy, const std::function<void(bool, int, const QString &)> &done);
 
+    struct CheckJob {
+        QString sourceId;
+        int gen = 0;
+        int index = 0;
+    };
+
     ProxyModel m_model;
+    ProxySourceModel m_sources;
+    QNetworkAccessManager *m_nam = nullptr;
+    QList<CheckJob> m_checkQueue;
+    int m_checksRunning = 0;
     QSettings m_settings;
     QTimer m_pollTimer;
     QHash<qint64, Session> m_sessions;

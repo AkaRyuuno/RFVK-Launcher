@@ -268,8 +268,17 @@ Window {
                         onAddRequested: addProxyDlg.openAdd()
                         onEditRequested: (slot) => addProxyDlg.openEdit(slot)
                         onDeleteRequested: (slotId, slotName) => {
+                            delProxyConfirmDlg.isSource = false
                             delProxyConfirmDlg.slotId = slotId
                             delProxyConfirmDlg.slotName = slotName
+                            delProxyConfirmDlg.open()
+                        }
+                        onAddSourceRequested: addSourceDlg.openAdd()
+                        onEditSourceRequested: (source) => addSourceDlg.openEdit(source)
+                        onDeleteSourceRequested: (sourceId, sourceName) => {
+                            delProxyConfirmDlg.isSource = true
+                            delProxyConfirmDlg.slotId = sourceId
+                            delProxyConfirmDlg.slotName = sourceName
                             delProxyConfirmDlg.open()
                         }
                     }
@@ -390,10 +399,12 @@ Window {
     AddAccountDialog { id: addDlg }
     SettingsDialog { id: settingsDlg }
     AddProxyDialog { id: addProxyDlg }
+    AddSourceDialog { id: addSourceDlg }
 
-    // Диалог подтверждения удаления прокси
+    // Диалог подтверждения удаления прокси или источника прокси
     Popup {
         id: delProxyConfirmDlg
+        property bool isSource: false
         property string slotId: ""
         property string slotName: ""
 
@@ -422,13 +433,13 @@ Window {
             }
 
             AppText {
-                text: Strings.proxyDeleteConfirmTitle
+                text: delProxyConfirmDlg.isSource ? Strings.sourceDeleteConfirmTitle : Strings.proxyDeleteConfirmTitle
                 role: "h2"; width: parent.width; wrapMode: Text.WordWrap
             }
             AppText {
                 width: parent.width; wrapMode: Text.WordWrap
                 role: "small"; color: Theme.muted
-                text: Strings.proxyDeleteConfirmBody
+                text: delProxyConfirmDlg.isSource ? Strings.sourceDeleteConfirmBody : Strings.proxyDeleteConfirmBody
             }
 
             Item {
@@ -449,7 +460,10 @@ Window {
                         text: Strings.proxyDelete
                         fontRole: "bodyStrong"
                         onClicked: {
-                            ProxyManager.removeProxy(delProxyConfirmDlg.slotId)
+                            if (delProxyConfirmDlg.isSource)
+                                ProxyManager.removeSource(delProxyConfirmDlg.slotId)
+                            else
+                                ProxyManager.removeProxy(delProxyConfirmDlg.slotId)
                             delProxyConfirmDlg.close()
                         }
                     }
@@ -458,7 +472,7 @@ Window {
         }
     }
 
-    // Автодействия для скриншотов (RFVK_OPEN=add|launch|refresh|proxies|addproxy).
+    // Автодействия для скриншотов (RFVK_OPEN=add|launch|refresh|proxies|addproxy|addsource).
     Component.onCompleted: {
         if (typeof StartupOpen === "undefined") return
         if (StartupOpen === "add") addDlg.open()
@@ -466,6 +480,7 @@ Window {
         else if (StartupOpen === "proxies") win.activeTab = "proxies"
         else if (StartupOpen === "addproxy") { win.activeTab = "proxies"; addProxyDlg.openAdd() }
         else if (StartupOpen === "addproxyauth") { win.activeTab = "proxies"; addProxyDlg.openAdd(true) }
+        else if (StartupOpen === "addsource") { win.activeTab = "proxies"; addSourceDlg.openAdd() }
         else if (StartupOpen === "delete") confirmDelete()
         else if (StartupOpen === "deleteconfirm") App.deleteSelected()
         else if (StartupOpen === "import") App.importSession()

@@ -57,6 +57,10 @@ QVariant ProxyModel::data(const QModelIndex &index, int role) const
             list.append(pid);
         return list;
     }
+    case SourceIdRole:
+        return s.sourceId;
+    case SourceNameRole:
+        return s.sourceName;
     default:
         return {};
     }
@@ -82,7 +86,9 @@ QHash<int, QByteArray> ProxyModel::roleNames() const
         {LastStatusRole, "lastStatus"},
         {EnabledRole, "enabled"},
         {IsDirectRole, "isDirect"},
-        {ActivePidsRole, "activePids"}
+        {ActivePidsRole, "activePids"},
+        {SourceIdRole, "sourceId"},
+        {SourceNameRole, "sourceName"}
     };
     return roles;
 }

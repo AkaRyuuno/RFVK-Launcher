@@ -25,7 +25,9 @@ public:
         LastStatusRole,
         EnabledRole,
         IsDirectRole,
-        ActivePidsRole
+        ActivePidsRole,
+        SourceIdRole,
+        SourceNameRole
     };
 
     explicit ProxyModel(QObject *parent = nullptr);

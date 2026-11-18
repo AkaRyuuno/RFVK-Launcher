@@ -656,7 +656,7 @@ void Controller::startGame(const QString &accountId, const QString &persId, cons
     const QString prefSlot = m_proxyManager.accountPreferredSlot(accountId);
     const QString slotId = m_proxyManager.allocateSlot(prefSlot);
     if (slotId.isEmpty()) {
-        const QString msg = QStringLiteral("Все доступные слоты (прямой IP и прокси) заполнены (5/5). Добавьте новый прокси или дождитесь закрытия окон.");
+        const QString msg = QStringLiteral("Свободных слотов нет: прямой IP и прокси заполнены (5/5), в источниках нет рабочих свободных адресов. Добавьте прокси или источник, проверьте источники или дождитесь закрытия окон.");
         appendLog(msg, 2);
         emit toast(msg, 2);
         setError(accountId, msg);
