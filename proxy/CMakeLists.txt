@@ -3,9 +3,8 @@
 # Клиент 32-битный, поэтому это отдельный CMake-проект под Win32: в одном
 # дереве сборки MSVC нельзя смешать x64 и x86. Корневой CMakeLists.txt
 # настраивает его сам (генератор Visual Studio, -A Win32) и собирает вместе
-# с лаунчером.
+# с лаунчером — руками запускать не нужно. Отдельно, если очень хочется:
 #
-# Ручной запуск:
 #   cmake -S proxy -B out/build/proxy-x86 -G "Visual Studio 18 2026" -A Win32
 #   cmake --build out/build/proxy-x86 --config Release
 
@@ -28,9 +27,10 @@ add_library(rfvk_proxy SHARED
     rfvk_proxy.cpp
     rfvk_proxy_shared.h
 )
-target_compile_definitions(rfvk_proxy PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS)
-target_compile_options(rfvk_proxy PRIVATE /utf-8 /W3 /O2)
-target_link_libraries(rfvk_proxy PRIVATE ws2_32)
+target_compile_definitions(rfvk_proxy PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+target_compile_options(rfvk_proxy PRIVATE /utf-8 /W3)
+# iphlpapi — проверка соединений клиента, открытых до перехвата.
+target_link_libraries(rfvk_proxy PRIVATE ws2_32 iphlpapi)
 
 # Куда положить DLL — корневой проект передаёт каталог рядом с лаунчером.
 # $<1:...> убирает подкаталог конфигурации (Release/), который добавляет Visual Studio.

@@ -4,11 +4,13 @@ import QtQuick.Layouts
 import Rfvk
 
 // Карточка слота маршрутизации (Direct или Proxy) с индикатором вместимости (X/5 окон),
-// пингом, списком активных PIDs и кнопками управления.
+// пингом, списком активных PIDs и кнопками управления. Прокси, выданный из
+// источника, не редактируется: карточка показывает только адрес, источник и
+// занятость.
 Rectangle {
     id: card
-    property var slotData: model
     readonly property var pids: (model && typeof model.activePids !== "undefined") ? model.activePids : []
+    readonly property bool fromSource: model.sourceId.length > 0
     signal editRequested(var slot)
     signal deleteRequested(string slotId, string slotName)
 
@@ -86,6 +88,23 @@ Rectangle {
                             color: Theme.muted
                         }
                     }
+                    // Бейдж источника
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: 18
+                        width: srcText.implicitWidth + Theme.s12
+                        radius: Theme.rBadge
+                        color: Theme.badgeFill(Theme.accent)
+                        visible: card.fromSource
+                        AppText {
+                            id: srcText
+                            anchors.centerIn: parent
+                            text: Strings.slotFromSource(model.sourceName)
+                            role: "caption"
+                            font.weight: Font.DemiBold
+                            color: Theme.accent
+                        }
+                    }
                     // Бейдж авторизации
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
@@ -97,7 +116,7 @@ Rectangle {
                         AppText {
                             id: authText
                             anchors.centerIn: parent
-                            text: "Auth"
+                            text: Strings.proxyAuthBadge
                             role: "caption"
                             font.weight: Font.DemiBold
                             color: Theme.accent
@@ -107,9 +126,19 @@ Rectangle {
 
                 AppText {
                     text: model.isDirect ? Strings.proxyDirectDesc
+                        : card.fromSource ? Strings.slotFromSourceHint
                         : (model.host + ":" + model.port + (model.authEnabled && model.username.length > 0 ? " · " + model.username : ""))
                     role: "small"
                     color: Theme.muted
+                    elide: Text.ElideRight
+                    width: parent.width
+                }
+                // Итог последней проверки (причина ошибки — здесь же).
+                AppText {
+                    visible: !model.isDirect && model.lastStatus.length > 0
+                    text: model.lastStatus
+                    role: "caption"
+                    color: model.testOk ? Theme.muted : Theme.err
                     elide: Text.ElideRight
                     width: parent.width
                 }
@@ -126,19 +155,15 @@ Rectangle {
                     width: 7
                     height: 7
                     radius: 3.5
-                    color: model.pingMs >= 0 ? Theme.ok
-                         : model.pingMs === -2 ? Theme.err
-                         : Theme.muted
+                    color: !model.testOk ? Theme.err : model.pingMs >= 0 ? Theme.ok : Theme.muted
                 }
                 AppText {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: model.pingMs >= 0 ? (model.pingMs + " мс")
-                        : model.pingMs === -2 ? "Ошибка"
+                    text: !model.testOk ? Strings.proxyPingError
+                        : model.pingMs >= 0 ? Strings.proxyPingMs(model.pingMs)
                         : "—"
                     role: "caption"
-                    color: model.pingMs >= 0 ? Theme.ok
-                         : model.pingMs === -2 ? Theme.err
-                         : Theme.muted
+                    color: !model.testOk ? Theme.err : model.pingMs >= 0 ? Theme.ok : Theme.muted
                 }
 
                 // Кнопка пинга
@@ -161,11 +186,11 @@ Rectangle {
                 }
             }
 
-            // Кнопки управления (только для добавленных прокси)
+            // Кнопки управления (только для прокси, добавленных вручную)
             Row {
                 Layout.alignment: Qt.AlignVCenter
                 spacing: Theme.s8
-                visible: !model.isDirect
+                visible: !model.isDirect && !card.fromSource
 
                 // Вкл/Выкл переключатель
                 AppToggle {
@@ -236,7 +261,7 @@ Rectangle {
                 AppText {
                     id: directPillText
                     anchors.centerIn: parent
-                    text: "Основной слот"
+                    text: Strings.proxyDirectBadge
                     role: "caption"
                     color: Theme.muted
                 }
@@ -259,15 +284,18 @@ Rectangle {
                 Layout.preferredWidth: 160
                 spacing: 4
 
-                Row {
+                // Подпись слева, счётчик справа.
+                Item {
                     width: parent.width
+                    height: loadLabel.implicitHeight
                     AppText {
-                        text: "Занятость слота"
+                        id: loadLabel
+                        text: Strings.slotLoad
                         role: "caption"
                         color: Theme.muted
                     }
-                    Item { Layout.fillWidth: true; width: 1 }
                     AppText {
+                        anchors.right: parent.right
                         text: Strings.slotCapacityText(model.activeClients, model.maxClients)
                         role: "caption"
                         font.weight: Font.DemiBold
@@ -305,7 +333,7 @@ Rectangle {
 
                 AppText {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: model.activeClients > 0 ? "Клиенты (PID):" : "Окна игры не запущены"
+                    text: model.activeClients > 0 ? Strings.slotPids : Strings.slotNoClients
                     role: "small"
                     color: Theme.muted
                 }
@@ -347,7 +375,7 @@ Rectangle {
                 AppText {
                     id: fullText
                     anchors.centerIn: parent
-                    text: "5/5 Лимит исчерпан"
+                    text: Strings.slotFull
                     role: "caption"
                     font.weight: Font.DemiBold
                     color: Theme.err

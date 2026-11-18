@@ -15,7 +15,10 @@ qt_add_executable(RFVKLauncher
     ${CMAKE_SOURCE_DIR}/proxy/rfvk_proxy_shared.h
     src/ProxySlot.h
     src/ProxyModel.cpp src/ProxyModel.h
-    src/ProxyManager.cpp src/ProxyManager.h
+    src/ProxyProbe.cpp src/ProxyProbe.h
+    src/ProxySource.cpp src/ProxySource.h
+    src/ProxySourceModel.cpp src/ProxySourceModel.h
+    src/ProxyManager.cpp src/ProxyManagerSources.cpp src/ProxyManager.h
     src/Controller.cpp src/Controller.h
 )
 
@@ -53,6 +56,8 @@ qt_add_qml_module(RFVKLauncher
         qml/ProxyCard.qml
         qml/ProxyPanel.qml
         qml/AddProxyDialog.qml
+        qml/ProxySourceCard.qml
+        qml/AddSourceDialog.qml
     RESOURCES
         resources/app.png
         resources/fonts/Exo2-Variable.ttf
@@ -89,8 +94,6 @@ if(WIN32)
     set_source_files_properties(resources/app.rc PROPERTIES COMPILE_DEFINITIONS
         "RFVK_VER_MAJOR=${PROJECT_VERSION_MAJOR};RFVK_VER_MINOR=${PROJECT_VERSION_MINOR};RFVK_VER_PATCH=${PROJECT_VERSION_PATCH}")
 endif()
-
-
 
 # ── 32-битная rfvk_autologin.dll (автовход внутри клиента) ───────────────────
 # Клиент RF_Online.exe 32-битный, и библиотека, которая в нём работает, тоже
@@ -142,6 +145,7 @@ if(WIN32 AND RFVK_AUTOLOGIN)
     if(RFVK_X86_VS_INSTANCE)
         list(APPEND _rfvk_x86_args "-DCMAKE_GENERATOR_INSTANCE=${RFVK_X86_VS_INSTANCE}")
     endif()
+    # Окружение консоли x64 (Platform=x64 и т. п.) сбило бы проект Win32 — убираем.
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env --unset=Platform --unset=VSCMD_ARG_TGT_ARCH
                 "${CMAKE_COMMAND}" ${_rfvk_x86_args}
@@ -157,6 +161,8 @@ if(WIN32 AND RFVK_AUTOLOGIN)
     endif()
 
     set(_rfvk_autologin_dll "${CMAKE_BINARY_DIR}/rfvk_autologin.dll")
+    # Всегда Release (/O2, /MT): отладочная DLL в клиенте не нужна. MSBuild сам
+    # решает, что пересобрать; без изменений шаг занимает пару секунд.
     add_custom_target(rfvk_autologin ALL
         COMMAND "${CMAKE_COMMAND}" -E env --unset=Platform --unset=VSCMD_ARG_TGT_ARCH
                 "${CMAKE_COMMAND}" --build "${_rfvk_x86_dir}" --config Release
@@ -172,6 +178,8 @@ else()
     set(_rfvk_autologin_summary "нет (RFVK_AUTOLOGIN=OFF) — автовход в лаунчере будет недоступен")
 endif()
 
+# ── 32-битная rfvk_proxy.dll (прокси для клиента) ────────────────────────────
+# Так же, как rfvk_autologin.dll: отдельный проект Win32, всегда Release.
 if(WIN32 AND RFVK_PROXY)
     set(_rfvk_proxy_dir "${CMAKE_BINARY_DIR}/proxy-x86")
     set(_rfvk_proxy_args

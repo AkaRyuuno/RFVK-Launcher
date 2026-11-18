@@ -656,7 +656,7 @@ void Controller::startGame(const QString &accountId, const QString &persId, cons
     const QString prefSlot = m_proxyManager.accountPreferredSlot(accountId);
     const QString slotId = m_proxyManager.allocateSlot(prefSlot);
     if (slotId.isEmpty()) {
-        const QString msg = QStringLiteral("Все доступные слоты (прямой IP и прокси) заполнены (5/5). Добавьте новый прокси или дождитесь закрытия окон.");
+        const QString msg = QStringLiteral("Свободных слотов нет: прямой IP и прокси заполнены (5/5), в источниках нет рабочих свободных адресов. Добавьте прокси или источник, проверьте источники или дождитесь закрытия окон.");
         appendLog(msg, 2);
         emit toast(msg, 2);
         setError(accountId, msg);
@@ -677,8 +677,11 @@ void Controller::startGame(const QString &accountId, const QString &persId, cons
         appendLog(QStringLiteral("RF Online запущен · ") + nick, 1);
         if (m_batchTotal <= 1)
             emit toast(QStringLiteral("RF Online запущен · ") + nick, 1);
-        // Регистрация в ProxyManager (привязка PID к слоту, создание shared config, инжект rfvk_proxy.dll)
-        m_proxyManager.registerProcess(pid, slotId, nick);
+        // Учёт в слоте; для прокси — подключение rfvk_proxy.dll. Не вышло с
+        // прокси — клиент уже закрыт (он пошёл бы с реального IP), HUD и
+        // автовход ему не нужны. Прямой IP при сбое учёта просто играет.
+        if (!m_proxyManager.registerProcess(pid, slotId, nick) && slotId != ProxySlot::directId())
+            return;
         // По настройке — подключить улучшенный HUD к этому клиенту (не срывает
         // запуск при неудаче; пропускается, если библиотеки нет рядом с лаунчером).
         if (m_hudEnabled && HudInjector::dllAvailable())

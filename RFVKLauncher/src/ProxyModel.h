@@ -16,16 +16,18 @@ public:
         PortRole,
         AuthEnabledRole,
         UsernameRole,
-        PasswordRole,
         ActiveClientsRole,
         MaxClientsRole,
         CapacityStringRole,
         IsFullRole,
         PingMsRole,
+        TestOkRole,
         LastStatusRole,
         EnabledRole,
         IsDirectRole,
-        ActivePidsRole
+        ActivePidsRole,
+        SourceIdRole,
+        SourceNameRole
     };
 
     explicit ProxyModel(QObject *parent = nullptr);
@@ -36,14 +38,12 @@ public:
 
     int indexOfId(const QString &id) const;
     const ProxySlot &at(int row) const { return m_slots.at(row); }
-    ProxySlot &slotRef(int row) { return m_slots[row]; }
     const QVector<ProxySlot> &slotItems() const { return m_slots; }
 
     void setSlots(const QVector<ProxySlot> &items);
     void addSlot(const ProxySlot &slot);
     void updateSlot(int row, const ProxySlot &slot);
     void removeSlot(int row);
-    void notifySlotChanged(int row);
 
 private:
     QVector<ProxySlot> m_slots;

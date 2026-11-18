@@ -3,29 +3,34 @@ import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import Rfvk
 
-// Панель управления слотами маршрутизации (Direct + SOCKS5/HTTP прокси).
-// Показывает емкость каждого слота (X/5), статус хук-библиотеки, запущенные PIDs
-// и предоставляет кнопки добавления/редактирования/проверки.
+// Панель управления слотами маршрутизации (Direct + SOCKS5/HTTP прокси) и
+// источниками прокси (списки по URL). Показывает емкость каждого слота (X/5),
+// статус хук-библиотеки, запущенные PIDs и кнопки добавления/редактирования/
+// проверки. Прокси, выданные из источников, — отдельные карточки без
+// редактирования.
 Item {
     id: root
     signal addRequested()
     signal editRequested(var slot)
     signal deleteRequested(string slotId, string slotName)
+    signal addSourceRequested()
+    signal editSourceRequested(var source)
+    signal deleteSourceRequested(string sourceId, string sourceName)
 
     ColumnLayout {
         anchors.fill: parent
         spacing: Theme.s16
 
-        // ── Заголовок панели + кнопка «+ Добавить прокси» ──
+        // ── Заголовок панели + кнопки «Добавить источник» и «Добавить прокси» ──
         Item {
             Layout.fillWidth: true
-            implicitHeight: Math.max(hdrLeft.height, addBtn.height)
+            implicitHeight: Math.max(hdrLeft.height, addBtns.height)
 
             Column {
                 id: hdrLeft
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.right: addBtn.left
+                anchors.right: addBtns.left
                 anchors.rightMargin: Theme.s16
                 spacing: Theme.s4
 
@@ -42,14 +47,24 @@ Item {
                 }
             }
 
-            SecondaryButton {
-                id: addBtn
+            Row {
+                id: addBtns
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                kind: "accent"
-                iconName: "plus"
-                text: Strings.addProxy
-                onClicked: root.addRequested()
+                spacing: Theme.s8
+
+                SecondaryButton {
+                    kind: "outline"
+                    iconName: "download"
+                    text: Strings.addSource
+                    onClicked: root.addSourceRequested()
+                }
+                SecondaryButton {
+                    kind: "accent"
+                    iconName: "plus"
+                    text: Strings.addProxy
+                    onClicked: root.addRequested()
+                }
             }
         }
 
@@ -88,7 +103,7 @@ Item {
                             role: "bodyStrong"
                         }
                         AppText {
-                            text: ProxyManager.totalActiveClients > 0 ? "Слоты заняты клиентами" : "Все слоты свободны"
+                            text: ProxyManager.totalActiveClients > 0 ? Strings.slotsBusy : Strings.slotsIdle
                             role: "caption"
                             color: Theme.muted
                         }
@@ -126,7 +141,7 @@ Item {
                             role: "bodyStrong"
                         }
                         AppText {
-                            text: ProxyManager.availableSlotsCount > 0 ? "Готовы к запуску окон" : "Все доступные слоты заполнены (5/5)"
+                            text: ProxyManager.availableSlotsCount > 0 ? Strings.slotsReady : Strings.slotsAllFull
                             role: "caption"
                             color: ProxyManager.availableSlotsCount > 0 ? Theme.muted : Theme.err
                         }
@@ -160,12 +175,12 @@ Item {
                     Column {
                         anchors.verticalCenter: parent.verticalCenter
                         AppText {
-                            text: ProxyManager.proxyDllAvailable ? "Сетевой перехват активен" : "Библиотека не найдена"
+                            text: ProxyManager.proxyDllAvailable ? Strings.proxyDllReady : Strings.proxyDllMissing
                             role: "bodyStrong"
                             color: ProxyManager.proxyDllAvailable ? Theme.text : Theme.err
                         }
                         AppText {
-                            text: ProxyManager.proxyDllAvailable ? "rfvk_proxy.dll готова" : "Соберите с RFVK_PROXY=ON"
+                            text: ProxyManager.proxyDllAvailable ? Strings.proxyDllReadyHint : Strings.proxyDllMissingHint
                             role: "caption"
                             color: Theme.muted
                         }
@@ -174,21 +189,55 @@ Item {
             }
         }
 
-        // ── Список слотов маршрутизации ──
-        ListView {
-            id: slotList
+        // ── Слоты маршрутизации и источники ──
+        Flickable {
+            id: flick
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            spacing: Theme.s12
-            model: ProxyManager.model
+            contentWidth: width
+            contentHeight: listCol.implicitHeight
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            delegate: ProxyCard {
-                width: slotList.width
-                onEditRequested: (slot) => root.editRequested(slot)
-                onDeleteRequested: (slotId, slotName) => root.deleteRequested(slotId, slotName)
+            Column {
+                id: listCol
+                width: flick.width
+                spacing: Theme.s12
+
+                Repeater {
+                    model: ProxyManager.model
+                    delegate: ProxyCard {
+                        width: listCol.width
+                        onEditRequested: (slot) => root.editRequested(slot)
+                        onDeleteRequested: (slotId, slotName) => root.deleteRequested(slotId, slotName)
+                    }
+                }
+
+                Column {
+                    width: parent.width
+                    topPadding: Theme.s8
+                    spacing: Theme.s4
+                    visible: sourceRepeater.count > 0
+                    AppText { text: Strings.sourcesTitle; role: "h3" }
+                    AppText {
+                        text: Strings.sourcesSubtitle
+                        role: "small"
+                        color: Theme.muted
+                        wrapMode: Text.WordWrap
+                        width: parent.width
+                    }
+                }
+
+                Repeater {
+                    id: sourceRepeater
+                    model: ProxyManager.sources
+                    delegate: ProxySourceCard {
+                        width: listCol.width
+                        onEditRequested: (source) => root.editSourceRequested(source)
+                        onDeleteRequested: (sourceId, sourceName) => root.deleteSourceRequested(sourceId, sourceName)
+                    }
+                }
             }
         }
     }

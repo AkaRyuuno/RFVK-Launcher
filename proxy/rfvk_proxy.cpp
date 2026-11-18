@@ -1,561 +1,838 @@
-// rfvk_proxy.dll — высокопроизводительная 32-битная библиотека перехвата сетевого трафика.
+// rfvk_proxy.dll — направляет TCP-соединения клиента RF Online через прокси.
 //
-// Инжектируется лаунчером RFVK в 32-битный клиент RF_Online.exe.
-// Перехватывает вызовы connect, WSAConnect и getpeername в ws2_32.dll:
-// - Локальные соединения (127.0.0.1) пропускаются напрямую без задержек.
-// - Если прокси выключен (Direct) — нулевой оверхед, прямое подключение.
-// - При активном SOCKS5 (RFC 1928, RFC 1929) или HTTP CONNECT:
-//   прозрачно выполняет рукопожатие с прокси-сервером и связывает сокет
-//   с удалённым сервером игры. После рукопожатия поток данных идёт на
-//   полной нативной скорости без модификаций пакетов.
+// Лаунчер подключает библиотеку к только что запущенному RF_Online.exe так же,
+// как автовход (LoadLibrary-инжект, RFVKLauncher/src/RemoteLoadLibrary.*).
+// Настройки прокси — в общей памяти (rfvk_proxy_shared.h).
+//
+// Перехваты в ws2_32.dll — hotpatch: у экспортов x86-ws2_32 пролог
+// «8B FF» (mov edi, edi), перед ним 5 байт заполнителя (CC). В заполнитель
+// пишется JMP на наш обработчик, затем «mov edi, edi» атомарно заменяется на
+// короткий JMP назад. Оригинал вызывается с адреса функции + 2 — трамплины и
+// копирование кода не нужны. Чужой пролог (функцию уже перехватил кто-то
+// другой) — перехват не ставится, и лаунчер закрывает клиент.
+//
+// Клиент работает с неблокирующими сокетами через WSAEventSelect (импорт
+// WSACreateEvent / WSAEventSelect / WSAEnumNetworkEvents). Поэтому connect()
+// к игровому серверу:
+//   1. снимает с сокета регистрацию событий (сокет остаётся неблокирующим);
+//   2. подключается к прокси и проводит рукопожатие, ожидая готовности через
+//      select() с общим дедлайном;
+//   3. возвращает регистрацию и сообщает итог так, как его ждёт клиент:
+//      WSAEWOULDBLOCK и FD_CONNECT (событие взводится, FD_CONNECT
+//      досылается в WSAEnumNetworkEvents). Блокирующий сокет получает
+//      обычный результат connect().
+// После рукопожатия данные идут по сокету как есть, библиотека их не трогает.
+// getpeername() отдаёт адрес игрового сервера, а не прокси.
+//
+// Утечки мимо прокси закрыты так: TCP по IPv6 к нелокальным адресам
+// запрещён (прокси принимает только IPv4-цели), а сразу после установки
+// перехватов библиотека проверяет, не открыл ли клиент соединений раньше.
+// Ограничения: UDP и ConnectEx (через WSAIoctl) не перехватываются — клиент
+// ими не пользуется; имена игровых серверов клиент разрешает сам.
 
+#ifndef UNICODE
+#define UNICODE
+#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-
-#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#include <iphlpapi.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <atomic>
+#include <cwchar>
 
 #include "rfvk_proxy_shared.h"
 
-#pragma comment(lib, "ws2_32.lib")
+namespace px = rfvk_proxy;
 
 namespace {
 
-template <typename T, size_t N>
-constexpr size_t countOf(T const (&)[N]) noexcept {
-    return N;
-}
+constexpr DWORD kHandshakeTimeoutMs = 15000; // подключение к прокси + рукопожатие
+constexpr int kMaxHttpHeader = 8192;         // ответ HTTP-прокси длиннее — ошибка
+constexpr int kMaxSockets = 256;             // отслеживаемые сокеты клиента
 
-// ── Общая конфигурация из лаунчера ──────────────────────────────────────────
-HANDLE g_mapHandle = nullptr;
-rfvk_proxy::SharedConfig *g_cfg = nullptr;
+// ─────────────────────────── настройки прокси ───────────────────────────────
 
-// ── Структура перехвата (Hotpatch 5-byte JMP Trampoline) ─────────────────────
-#pragma pack(push, 1)
-struct Trampoline {
-    uint8_t prologue[5]; // Скопированные оригинальные инструкции (8B FF 55 8B EC)
-    uint8_t jmpOpcode;   // 0xE9
-    uint32_t jmpRel;     // Относительное смещение к original_func + 5
-};
-#pragma pack(pop)
-
-using FnConnect = int(WSAAPI *)(SOCKET s, const struct sockaddr *name, int namelen);
-using FnWSAConnect = int(WSAAPI *)(SOCKET s, const struct sockaddr *name, int namelen,
-                                   LPWSABUF lpCallerData, LPWSABUF lpCalleeData,
-                                   LPQOS lpSQOS, LPQOS lpGQOS);
-using FnGetPeerName = int(WSAAPI *)(SOCKET s, struct sockaddr *name, int *namelen);
-using FnCloseSocket = int(WSAAPI *)(SOCKET s);
-
-static FnConnect g_origConnect = nullptr;
-static FnWSAConnect g_origWSAConnect = nullptr;
-static FnGetPeerName g_origGetPeerName = nullptr;
-static FnCloseSocket g_origCloseSocket = nullptr;
-
-static Trampoline *g_trampConnect = nullptr;
-static Trampoline *g_trampWSAConnect = nullptr;
-static Trampoline *g_trampGetPeerName = nullptr;
-static Trampoline *g_trampCloseSocket = nullptr;
-
-// ── Отслеживание сокетов для прозрачного getpeername ─────────────────────────
-struct SocketPeerEntry {
-    SOCKET s;
-    sockaddr_in targetAddr;
+// Копия настроек из общей памяти: читается один раз при загрузке, дальше не
+// меняется — потокам не нужна синхронизация, а строки гарантированно с нулём.
+struct Config {
+    px::ProxyType type = px::ProxyType::Direct;
+    char host[px::kHostLen] = {};
+    std::uint16_t port = 0;
+    bool auth = false;
+    char user[px::kAuthLen] = {};
+    char pass[px::kAuthLen] = {};
 };
 
-constexpr int kMaxTrackedSockets = 64;
-static SocketPeerEntry g_peers[kMaxTrackedSockets];
-static CRITICAL_SECTION g_cs;
+Config g_conf;
+HANDLE g_map = nullptr;
+px::SharedConfig *g_shared = nullptr; // для статуса; настройки — из g_conf
+CRITICAL_SECTION g_statusCs;
 
-void setTrackedPeer(SOCKET s, const sockaddr_in &addr) {
-    EnterCriticalSection(&g_cs);
-    for (int i = 0; i < kMaxTrackedSockets; ++i) {
-        if (g_peers[i].s == 0 || g_peers[i].s == INVALID_SOCKET || g_peers[i].s == s) {
-            g_peers[i].s = s;
-            g_peers[i].targetAddr = addr;
-            break;
-        }
-    }
-    LeaveCriticalSection(&g_cs);
+template <size_t N>
+void copyZ(char (&dst)[N], const char *src)
+{
+    std::memcpy(dst, src, N);
+    dst[N - 1] = '\0';
 }
 
-bool getTrackedPeer(SOCKET s, sockaddr_in &outAddr) {
-    bool found = false;
-    EnterCriticalSection(&g_cs);
-    for (int i = 0; i < kMaxTrackedSockets; ++i) {
-        if (g_peers[i].s == s) {
-            outAddr = g_peers[i].targetAddr;
-            found = true;
-            break;
-        }
-    }
-    LeaveCriticalSection(&g_cs);
-    return found;
+void setStatus(px::TunnelState state, int err, const wchar_t *fmt, ...)
+{
+    if (!g_shared)
+        return;
+    EnterCriticalSection(&g_statusCs);
+    g_shared->tunnelState = state;
+    g_shared->lastError = err;
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf_s(g_shared->statusText, px::kStatusLen, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    LeaveCriticalSection(&g_statusCs);
 }
 
-void removeTrackedPeer(SOCKET s) {
-    EnterCriticalSection(&g_cs);
-    for (int i = 0; i < kMaxTrackedSockets; ++i) {
-        if (g_peers[i].s == s) {
-            g_peers[i].s = INVALID_SOCKET;
-            break;
-        }
-    }
-    LeaveCriticalSection(&g_cs);
+void setHookStatus(px::HookStatus status, const wchar_t *text)
+{
+    if (!g_shared)
+        return;
+    EnterCriticalSection(&g_statusCs);
+    wcsncpy_s(g_shared->statusText, text, _TRUNCATE);
+    LeaveCriticalSection(&g_statusCs);
+    InterlockedExchange(reinterpret_cast<volatile LONG *>(&g_shared->hookStatus), status);
 }
 
-// ── Установка 5-байтного хотпатч-хука ─────────────────────────────────────────
-Trampoline *installHook(void *targetFunc, void *hookFunc) {
-    if (!targetFunc || !hookFunc)
+bool openSharedConfig()
+{
+    wchar_t name[64];
+    _snwprintf_s(name, _TRUNCATE, L"%ls%lu", px::kMappingPrefix, GetCurrentProcessId());
+    g_map = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+    if (!g_map)
+        return false;
+    g_shared = static_cast<px::SharedConfig *>(
+        MapViewOfFile(g_map, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(px::SharedConfig)));
+    if (!g_shared || g_shared->magic != px::kMagic || g_shared->version != px::kVersion
+        || g_shared->size != sizeof(px::SharedConfig)) {
+        if (g_shared)
+            UnmapViewOfFile(g_shared);
+        g_shared = nullptr;
+        CloseHandle(g_map);
+        g_map = nullptr;
+        return false;
+    }
+    g_conf.type = static_cast<px::ProxyType>(g_shared->type);
+    copyZ(g_conf.host, g_shared->proxyHost);
+    g_conf.port = g_shared->proxyPort;
+    g_conf.auth = g_shared->authEnabled != 0;
+    copyZ(g_conf.user, g_shared->username);
+    copyZ(g_conf.pass, g_shared->password);
+    // Пароль в общей памяти больше не нужен.
+    SecureZeroMemory(g_shared->password, sizeof(g_shared->password));
+    return true;
+}
+
+// ─────────────────────────── hotpatch-перехват ──────────────────────────────
+
+// Ставит перехват на функцию с прологом «8B FF» и 5 байтами CC/90 перед ней.
+// Возвращает адрес продолжения оригинала (функция + 2) или nullptr.
+void *hotpatch(void *target, void *detour)
+{
+    auto *p = static_cast<std::uint8_t *>(target);
+    if (!p || (reinterpret_cast<std::uintptr_t>(p) & 1) != 0) // атомарная запись 2 байт — по чётному адресу
         return nullptr;
-
-    auto *target = reinterpret_cast<uint8_t *>(targetFunc);
-
-    // Проверяем классический пролог Windows API: 8B FF (mov edi, edi), 55 (push ebp), 8B EC (mov ebp, esp)
-    if (target[0] != 0x8B || target[1] != 0xFF || target[2] != 0x55 || target[3] != 0x8B || target[4] != 0xEC) {
-        // Если функция не совпадает с ожидаемым прологом, всё равно можно поставить JMP,
-        // если первые 5 байт не содержат RIP/rel инструкций.
+    if (p[0] != 0x8B || p[1] != 0xFF)
+        return nullptr;
+    for (int i = 1; i <= 5; ++i) {
+        if (p[-i] != 0xCC && p[-i] != 0x90)
+            return nullptr;
     }
 
-    auto *tramp = reinterpret_cast<Trampoline *>(
-        VirtualAlloc(nullptr, sizeof(Trampoline), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-    if (!tramp)
+    DWORD old = 0;
+    if (!VirtualProtect(p - 5, 7, PAGE_EXECUTE_READWRITE, &old))
         return nullptr;
-
-    // Копируем первые 5 байт оригинальной функции
-    memcpy(tramp->prologue, target, 5);
-    tramp->jmpOpcode = 0xE9; // JMP rel32
-    tramp->jmpRel = static_cast<uint32_t>((target + 5) - (reinterpret_cast<uint8_t *>(&tramp->jmpOpcode) + 5));
-
-    // Устанавливаем перехват в целевой функции
-    DWORD oldProtect = 0;
-    if (!VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        VirtualFree(tramp, 0, MEM_RELEASE);
-        return nullptr;
-    }
-
-    target[0] = 0xE9; // JMP rel32
-    *reinterpret_cast<uint32_t *>(target + 1) =
-        static_cast<uint32_t>(reinterpret_cast<uint8_t *>(hookFunc) - (target + 5));
-
-    VirtualProtect(target, 5, oldProtect, &oldProtect);
-    FlushInstructionCache(GetCurrentProcess(), target, 5);
-    FlushInstructionCache(GetCurrentProcess(), tramp, sizeof(Trampoline));
-
-    return tramp;
+    p[-5] = 0xE9; // JMP rel32 → обработчик
+    const auto rel = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(detour)
+                                               - reinterpret_cast<std::uintptr_t>(p));
+    std::memcpy(p - 4, &rel, sizeof(rel));
+    // «mov edi, edi» → «jmp $-5» (EB F9) одной атомарной записью: поток,
+    // который сейчас входит в функцию, видит либо старый, либо новый пролог.
+    InterlockedExchange16(reinterpret_cast<volatile SHORT *>(p), static_cast<SHORT>(0xF9EB));
+    VirtualProtect(p - 5, 7, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p - 5, 7);
+    return p + 2;
 }
 
-// ── Вспомогательные сетевые функции ──────────────────────────────────────────
+// ─────────────────────────── оригиналы ws2_32 ───────────────────────────────
 
-int recvExact(SOCKET s, char *buf, int len) {
-    int total = 0;
-    while (total < len) {
-        int r = recv(s, buf + total, len - total, 0);
-        if (r <= 0)
-            return total;
-        total += r;
+using FnConnect = int(WSAAPI *)(SOCKET, const sockaddr *, int);
+using FnWSAConnect = int(WSAAPI *)(SOCKET, const sockaddr *, int, LPWSABUF, LPWSABUF, LPQOS, LPQOS);
+using FnGetPeerName = int(WSAAPI *)(SOCKET, sockaddr *, int *);
+using FnCloseSocket = int(WSAAPI *)(SOCKET);
+using FnWSAEventSelect = int(WSAAPI *)(SOCKET, WSAEVENT, long);
+using FnWSAEnumNetworkEvents = int(WSAAPI *)(SOCKET, WSAEVENT, LPWSANETWORKEVENTS);
+
+FnConnect g_connect = nullptr;
+FnWSAConnect g_wsaConnect = nullptr;
+FnGetPeerName g_getPeerName = nullptr;
+FnCloseSocket g_closeSocket = nullptr;
+FnWSAEventSelect g_eventSelect = nullptr;
+FnWSAEnumNetworkEvents g_enumEvents = nullptr;
+
+// ─────────────────────────── учёт сокетов ───────────────────────────────────
+
+struct SockInfo {
+    SOCKET s = INVALID_SOCKET;
+    WSAEVENT event = nullptr;  // регистрация WSAEventSelect клиента
+    long mask = 0;
+    bool tunneled = false;     // соединён через прокси
+    sockaddr_in peer = {};     // настоящий адрес для getpeername
+    bool fdConnectDue = false; // досылать FD_CONNECT в WSAEnumNetworkEvents
+    int fdConnectError = 0;
+    bool connectInFlight = false; // вернули WSAEWOULDBLOCK без регистрации событий
+};
+
+SockInfo g_socks[kMaxSockets];
+CRITICAL_SECTION g_sockCs;
+
+// Под g_sockCs. create — занять свободную запись, если сокета нет.
+SockInfo *findSock(SOCKET s, bool create)
+{
+    SockInfo *freeSlot = nullptr;
+    for (auto &e : g_socks) {
+        if (e.s == s)
+            return &e;
+        if (!freeSlot && e.s == INVALID_SOCKET)
+            freeSlot = &e;
     }
-    return total;
+    if (!create || !freeSlot)
+        return nullptr;
+    *freeSlot = SockInfo{};
+    freeSlot->s = s;
+    return freeSlot;
 }
 
-// Быстрое кодирование Base64 на стеке без динамических аллокаций памяти
-void base64Encode(const char *in, int inLen, char *out, int outMax) {
-    static const char kTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    int o = 0;
-    for (int i = 0; i < inLen && o + 4 < outMax; i += 3) {
-        uint32_t b0 = static_cast<uint8_t>(in[i]);
-        uint32_t b1 = (i + 1 < inLen) ? static_cast<uint8_t>(in[i + 1]) : 0;
-        uint32_t b2 = (i + 2 < inLen) ? static_cast<uint8_t>(in[i + 2]) : 0;
-        uint32_t triple = (b0 << 16) | (b1 << 8) | b2;
+// ─────────────────────────── ввод-вывод с дедлайном ─────────────────────────
 
-        out[o++] = kTable[(triple >> 18) & 0x3F];
-        out[o++] = kTable[(triple >> 12) & 0x3F];
-        out[o++] = (i + 1 < inLen) ? kTable[(triple >> 6) & 0x3F] : '=';
-        out[o++] = (i + 2 < inLen) ? kTable[triple & 0x3F] : '=';
+int remainingMs(DWORD deadline)
+{
+    const auto left = static_cast<LONG>(deadline - GetTickCount());
+    return left > 0 ? static_cast<int>(left) : 0;
+}
+
+// Ждёт готовности сокета (чтение или запись). 0 — готов, иначе код ошибки.
+int waitReady(SOCKET s, bool forWrite, DWORD deadline)
+{
+    const int ms = remainingMs(deadline);
+    if (ms == 0)
+        return WSAETIMEDOUT;
+    fd_set rw;
+    fd_set ex;
+    FD_ZERO(&rw);
+    FD_ZERO(&ex);
+    FD_SET(s, &rw);
+    FD_SET(s, &ex);
+    timeval tv{ms / 1000, (ms % 1000) * 1000};
+    const int n = select(0, forWrite ? nullptr : &rw, forWrite ? &rw : nullptr, &ex, &tv);
+    if (n == SOCKET_ERROR)
+        return WSAGetLastError();
+    if (n == 0)
+        return WSAETIMEDOUT;
+    if (FD_ISSET(s, &ex)) {
+        int err = 0;
+        int len = sizeof(err);
+        getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char *>(&err), &len);
+        return err ? err : WSAECONNREFUSED;
+    }
+    return 0;
+}
+
+int sendAll(SOCKET s, const void *data, int len, DWORD deadline)
+{
+    const auto *p = static_cast<const char *>(data);
+    while (len > 0) {
+        if (const int err = waitReady(s, true, deadline))
+            return err;
+        const int n = send(s, p, len, 0);
+        if (n == SOCKET_ERROR) {
+            const int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK)
+                continue;
+            return err;
+        }
+        p += n;
+        len -= n;
+    }
+    return 0;
+}
+
+int recvExact(SOCKET s, void *data, int len, DWORD deadline)
+{
+    auto *p = static_cast<char *>(data);
+    while (len > 0) {
+        if (const int err = waitReady(s, false, deadline))
+            return err;
+        const int n = recv(s, p, len, 0);
+        if (n == 0)
+            return WSAECONNRESET; // прокси закрыл соединение посреди рукопожатия
+        if (n == SOCKET_ERROR) {
+            const int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK)
+                continue;
+            return err;
+        }
+        p += n;
+        len -= n;
+    }
+    return 0;
+}
+
+// ─────────────────────────── рукопожатия ────────────────────────────────────
+
+// Итог рукопожатия: код Winsock (0 — успех) и пояснение для журнала.
+struct HsResult {
+    int err = 0;
+    const wchar_t *what = L"";
+};
+
+int socksReplyToWsa(std::uint8_t rep)
+{
+    switch (rep) {
+    case 0x02: return WSAEACCES;       // запрещено правилами прокси
+    case 0x03: return WSAENETUNREACH;
+    case 0x04: return WSAEHOSTUNREACH;
+    case 0x05: return WSAECONNREFUSED;
+    case 0x06: return WSAETIMEDOUT;
+    default: return WSAECONNREFUSED;
+    }
+}
+
+HsResult socks5(SOCKET s, const sockaddr_in &target, DWORD deadline)
+{
+    // 1. Приветствие: без авторизации и, если задан логин, логин/пароль.
+    const bool withAuth = g_conf.auth && g_conf.user[0] != '\0';
+    const std::uint8_t hello[] = {0x05, static_cast<std::uint8_t>(withAuth ? 2 : 1), 0x00, 0x02};
+    if (int err = sendAll(s, hello, withAuth ? 4 : 3, deadline))
+        return {err, L"приветствие SOCKS5"};
+
+    std::uint8_t method[2];
+    if (int err = recvExact(s, method, 2, deadline))
+        return {err, L"ответ на приветствие SOCKS5"};
+    if (method[0] != 0x05)
+        return {WSAECONNREFUSED, L"сервер не SOCKS5"};
+
+    if (method[1] == 0x02) {
+        if (!withAuth)
+            return {WSAEACCES, L"прокси требует логин и пароль"};
+        // 2. RFC 1929: длины влезают в байт — поля не длиннее kAuthLen - 1.
+        const auto ulen = static_cast<std::uint8_t>(std::strlen(g_conf.user));
+        const auto plen = static_cast<std::uint8_t>(std::strlen(g_conf.pass));
+        std::uint8_t auth[3 + 2 * px::kAuthLen];
+        int n = 0;
+        auth[n++] = 0x01;
+        auth[n++] = ulen;
+        std::memcpy(auth + n, g_conf.user, ulen);
+        n += ulen;
+        auth[n++] = plen;
+        std::memcpy(auth + n, g_conf.pass, plen);
+        n += plen;
+        const int err = sendAll(s, auth, n, deadline);
+        SecureZeroMemory(auth, sizeof(auth));
+        if (err)
+            return {err, L"отправка логина SOCKS5"};
+        std::uint8_t authRep[2];
+        if (int e = recvExact(s, authRep, 2, deadline))
+            return {e, L"ответ на логин SOCKS5"};
+        if (authRep[0] != 0x01 || authRep[1] != 0x00)
+            return {WSAEACCES, L"неверный логин или пароль SOCKS5"};
+    } else if (method[1] != 0x00) {
+        return {WSAEACCES, L"прокси не принял ни один способ входа SOCKS5"};
+    }
+
+    // 3. CONNECT к IPv4-адресу игрового сервера.
+    std::uint8_t req[10] = {0x05, 0x01, 0x00, 0x01};
+    std::memcpy(req + 4, &target.sin_addr.s_addr, 4);
+    std::memcpy(req + 8, &target.sin_port, 2); // уже в сетевом порядке
+    if (int err = sendAll(s, req, sizeof(req), deadline))
+        return {err, L"запрос CONNECT SOCKS5"};
+
+    std::uint8_t rep[4];
+    if (int err = recvExact(s, rep, 4, deadline))
+        return {err, L"ответ на CONNECT SOCKS5"};
+    if (rep[0] != 0x05)
+        return {WSAECONNREFUSED, L"неверный ответ SOCKS5"};
+    if (rep[1] != 0x00)
+        return {socksReplyToWsa(rep[1]), L"прокси отказал в соединении с сервером игры"};
+
+    // BND.ADDR + BND.PORT — дочитать, чтобы они не попали клиенту.
+    int rest = 0;
+    if (rep[3] == 0x01) {
+        rest = 4 + 2;
+    } else if (rep[3] == 0x04) {
+        rest = 16 + 2;
+    } else if (rep[3] == 0x03) {
+        std::uint8_t dlen = 0;
+        if (int err = recvExact(s, &dlen, 1, deadline))
+            return {err, L"ответ на CONNECT SOCKS5"};
+        rest = dlen + 2;
+    } else {
+        return {WSAECONNREFUSED, L"неверный тип адреса в ответе SOCKS5"};
+    }
+    std::uint8_t bnd[255 + 2];
+    if (int err = recvExact(s, bnd, rest, deadline))
+        return {err, L"ответ на CONNECT SOCKS5"};
+    return {};
+}
+
+void base64(const char *in, size_t len, char *out, size_t outSize)
+{
+    static const char kAbc[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 4 < outSize; i += 3) {
+        const std::uint32_t b0 = static_cast<std::uint8_t>(in[i]);
+        const std::uint32_t b1 = i + 1 < len ? static_cast<std::uint8_t>(in[i + 1]) : 0;
+        const std::uint32_t b2 = i + 2 < len ? static_cast<std::uint8_t>(in[i + 2]) : 0;
+        const std::uint32_t v = (b0 << 16) | (b1 << 8) | b2;
+        out[o++] = kAbc[(v >> 18) & 0x3F];
+        out[o++] = kAbc[(v >> 12) & 0x3F];
+        out[o++] = i + 1 < len ? kAbc[(v >> 6) & 0x3F] : '=';
+        out[o++] = i + 2 < len ? kAbc[v & 0x3F] : '=';
     }
     out[o] = '\0';
 }
 
-// Разрешение хоста прокси (поддержка IP-адресов и DNS)
-bool resolveProxy(const char *host, uint16_t port, sockaddr_in &outAddr) {
-    memset(&outAddr, 0, sizeof(outAddr));
-    outAddr.sin_family = AF_INET;
-    outAddr.sin_port = htons(port);
+HsResult httpConnect(SOCKET s, const sockaddr_in &target, DWORD deadline)
+{
+    char ip[INET_ADDRSTRLEN] = {};
+    inet_ntop(AF_INET, &target.sin_addr, ip, sizeof(ip));
+    const unsigned port = ntohs(target.sin_port);
 
-    unsigned long ip = inet_addr(host);
-    if (ip != INADDR_NONE) {
-        outAddr.sin_addr.s_addr = ip;
-        return true;
+    char auth[512] = {};
+    if (g_conf.auth && g_conf.user[0] != '\0') {
+        char creds[2 * px::kAuthLen];
+        const int n = _snprintf_s(creds, _TRUNCATE, "%s:%s", g_conf.user, g_conf.pass);
+        char b64[(sizeof(creds) + 2) / 3 * 4 + 1];
+        base64(creds, n > 0 ? static_cast<size_t>(n) : 0, b64, sizeof(b64));
+        _snprintf_s(auth, _TRUNCATE, "Proxy-Authorization: Basic %s\r\n", b64);
+        SecureZeroMemory(creds, sizeof(creds));
+        SecureZeroMemory(b64, sizeof(b64));
     }
-
-    struct hostent *he = gethostbyname(host);
-    if (he && he->h_addr_list && he->h_addr_list[0]) {
-        memcpy(&outAddr.sin_addr, he->h_addr_list[0], he->h_length);
-        return true;
-    }
-
-    return false;
-}
-
-// ── Выполнение SOCKS5 рукопожатия (RFC 1928 / RFC 1929) ──────────────────────
-bool performSocks5Handshake(SOCKET s, const sockaddr_in &target) {
-    // 1. Приветствие клиента (Greeting)
-    uint8_t greeting[4];
-    int greetLen = 0;
-    greeting[0] = 0x05; // SOCKS Version 5
-
-    if (g_cfg->authEnabled && g_cfg->username[0] != '\0') {
-        greeting[1] = 0x02; // 2 метода
-        greeting[2] = 0x00; // NO AUTH
-        greeting[3] = 0x02; // USER/PASSWORD
-        greetLen = 4;
-    } else {
-        greeting[1] = 0x01; // 1 метод
-        greeting[2] = 0x00; // NO AUTH
-        greetLen = 3;
-    }
-
-    if (send(s, reinterpret_cast<const char *>(greeting), greetLen, 0) != greetLen)
-        return false;
-
-    // 2. Ответ сервера с выбранным методом
-    uint8_t methodResp[2] = {};
-    if (recvExact(s, reinterpret_cast<char *>(methodResp), 2) != 2)
-        return false;
-
-    if (methodResp[0] != 0x05)
-        return false;
-
-    if (methodResp[1] == 0xFF) // No acceptable methods
-        return false;
-
-    // 3. Авторизация по логину и паролю при необходимости (RFC 1929)
-    if (methodResp[1] == 0x02) {
-        char authBuf[512];
-        const auto ulen = static_cast<uint8_t>(strlen(g_cfg->username));
-        const auto plen = static_cast<uint8_t>(strlen(g_cfg->password));
-
-        authBuf[0] = 0x01; // Версия суб-согласования
-        authBuf[1] = static_cast<char>(ulen);
-        memcpy(&authBuf[2], g_cfg->username, ulen);
-        authBuf[2 + ulen] = static_cast<char>(plen);
-        memcpy(&authBuf[3 + ulen], g_cfg->password, plen);
-
-        const int toSend = 3 + ulen + plen;
-        if (send(s, authBuf, toSend, 0) != toSend)
-            return false;
-
-        uint8_t authResp[2] = {};
-        if (recvExact(s, reinterpret_cast<char *>(authResp), 2) != 2)
-            return false;
-
-        if (authResp[1] != 0x00) // 0x00 = success
-            return false;
-    }
-
-    // 4. Запрос подключения (CONNECT request)
-    uint8_t req[10];
-    req[0] = 0x05; // VER = 5
-    req[1] = 0x01; // CMD = CONNECT
-    req[2] = 0x00; // RSV = 0
-    req[3] = 0x01; // ATYP = IPv4
-    memcpy(&req[4], &target.sin_addr.s_addr, 4);
-    memcpy(&req[8], &target.sin_port, 2); // уже в сетевом порядке байт
-
-    if (send(s, reinterpret_cast<const char *>(req), 10, 0) != 10)
-        return false;
-
-    // 5. Ответ сервера SOCKS5
-    uint8_t rep[4] = {};
-    if (recvExact(s, reinterpret_cast<char *>(rep), 4) != 4)
-        return false;
-
-    if (rep[0] != 0x05 || rep[1] != 0x00) // rep[1] == 0x00 успех
-        return false;
-
-    // Считываем адрес привязки (BND.ADDR + BND.PORT), чтобы очистить сокет
-    if (rep[3] == 0x01) { // IPv4: 4 байта IP + 2 байта порт
-        uint8_t bnd[6];
-        recvExact(s, reinterpret_cast<char *>(bnd), 6);
-    } else if (rep[3] == 0x03) { // Домен
-        uint8_t dlen = 0;
-        recvExact(s, reinterpret_cast<char *>(&dlen), 1);
-        char dom[260];
-        recvExact(s, dom, dlen + 2);
-    } else if (rep[3] == 0x04) { // IPv6
-        uint8_t bnd6[18];
-        recvExact(s, reinterpret_cast<char *>(bnd6), 18);
-    }
-
-    return true;
-}
-
-// ── Выполнение HTTP CONNECT рукопожатия ───────────────────────────────────────
-bool performHttpConnectHandshake(SOCKET s, const sockaddr_in &target) {
-    char targetIp[64] = {};
-    const char *ntoaRes = inet_ntoa(target.sin_addr);
-    if (ntoaRes)
-        strncpy_s(targetIp, ntoaRes, _TRUNCATE);
-    const uint16_t targetPort = ntohs(target.sin_port);
 
     char req[1024];
-    int reqLen = 0;
+    const int reqLen = _snprintf_s(req, _TRUNCATE,
+                                   "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n%s\r\n",
+                                   ip, port, ip, port, auth);
+    SecureZeroMemory(auth, sizeof(auth));
+    if (reqLen <= 0)
+        return {WSAEINVAL, L"запрос HTTP CONNECT"};
+    const int sendErr = sendAll(s, req, reqLen, deadline);
+    SecureZeroMemory(req, sizeof(req));
+    if (sendErr)
+        return {sendErr, L"запрос HTTP CONNECT"};
 
-    if (g_cfg->authEnabled && g_cfg->username[0] != '\0') {
-        char creds[256];
-        _snprintf_s(creds, sizeof(creds), _TRUNCATE, "%s:%s", g_cfg->username, g_cfg->password);
-        char b64[384];
-        base64Encode(creds, static_cast<int>(strlen(creds)), b64, sizeof(b64));
-
-        reqLen = _snprintf_s(req, sizeof(req), _TRUNCATE,
-                             "CONNECT %s:%u HTTP/1.1\r\n"
-                             "Host: %s:%u\r\n"
-                             "Proxy-Authorization: Basic %s\r\n"
-                             "Proxy-Connection: Keep-Alive\r\n"
-                             "\r\n",
-                             targetIp, targetPort, targetIp, targetPort, b64);
-    } else {
-        reqLen = _snprintf_s(req, sizeof(req), _TRUNCATE,
-                             "CONNECT %s:%u HTTP/1.1\r\n"
-                             "Host: %s:%u\r\n"
-                             "Proxy-Connection: Keep-Alive\r\n"
-                             "\r\n",
-                             targetIp, targetPort, targetIp, targetPort);
-    }
-
-    if (send(s, req, reqLen, 0) != reqLen)
-        return false;
-
-    // Считываем заголовки ответа до \r\n\r\n
-    char resp[1024] = {};
-    int received = 0;
-    while (received < sizeof(resp) - 1) {
-        char c = 0;
-        int r = recv(s, &c, 1, 0);
-        if (r <= 0)
-            return false;
-        resp[received++] = c;
-        if (received >= 4 && resp[received - 4] == '\r' && resp[received - 3] == '\n'
-            && resp[received - 2] == '\r' && resp[received - 1] == '\n') {
+    // Заголовки ответа читаются по байту — ровно до пустой строки, чтобы ни
+    // один байт после неё не пропал у клиента.
+    char head[kMaxHttpHeader + 1];
+    int got = 0;
+    for (;;) {
+        if (got == kMaxHttpHeader)
+            return {WSAECONNREFUSED, L"слишком длинный ответ HTTP-прокси"};
+        if (int err = recvExact(s, head + got, 1, deadline))
+            return {err, L"ответ HTTP-прокси"};
+        ++got;
+        if (got >= 4 && std::memcmp(head + got - 4, "\r\n\r\n", 4) == 0)
             break;
+    }
+    head[got] = '\0';
+
+    // Строка статуса: «HTTP/1.x NNN ...».
+    if (got < 12 || std::strncmp(head, "HTTP/1.", 7) != 0 || head[8] != ' ')
+        return {WSAECONNREFUSED, L"сервер не HTTP-прокси"};
+    const int status = std::atoi(head + 9);
+    if (status == 200)
+        return {};
+    if (status == 407)
+        return {WSAEACCES, L"HTTP-прокси требует логин и пароль (407)"};
+    return {WSAECONNREFUSED, L"HTTP-прокси отказал в соединении"};
+}
+
+// ─────────────────────────── маршрутизация connect ──────────────────────────
+
+sockaddr_in g_proxyAddr = {};
+bool g_proxyResolved = false;
+CRITICAL_SECTION g_resolveCs;
+
+bool resolveProxy(sockaddr_in &out)
+{
+    EnterCriticalSection(&g_resolveCs);
+    if (!g_proxyResolved) {
+        addrinfo hints = {};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        addrinfo *res = nullptr;
+        if (getaddrinfo(g_conf.host, nullptr, &hints, &res) == 0 && res) {
+            std::memcpy(&g_proxyAddr, res->ai_addr, sizeof(g_proxyAddr));
+            g_proxyAddr.sin_port = htons(g_conf.port);
+            g_proxyResolved = true;
+        }
+        if (res)
+            freeaddrinfo(res);
+    }
+    out = g_proxyAddr;
+    const bool ok = g_proxyResolved;
+    LeaveCriticalSection(&g_resolveCs);
+    return ok;
+}
+
+bool isStreamSocket(SOCKET s)
+{
+    int type = 0;
+    int len = sizeof(type);
+    return getsockopt(s, SOL_SOCKET, SO_TYPE, reinterpret_cast<char *>(&type), &len) == 0
+        && type == SOCK_STREAM;
+}
+
+enum class Route { Direct, Proxy, Block };
+
+Route classify(SOCKET s, const sockaddr *name, int namelen)
+{
+    if (!name || namelen < static_cast<int>(sizeof(sockaddr)))
+        return Route::Direct; // ws2_32 сам вернёт ошибку
+    if (name->sa_family == AF_INET && namelen >= static_cast<int>(sizeof(sockaddr_in))) {
+        const auto *sin = reinterpret_cast<const sockaddr_in *>(name);
+        const std::uint32_t ip = ntohl(sin->sin_addr.s_addr);
+        if ((ip >> 24) == 127 || ip == INADDR_ANY)
+            return Route::Direct; // локальные службы — напрямую
+        return isStreamSocket(s) ? Route::Proxy : Route::Direct;
+    }
+    if (name->sa_family == AF_INET6 && namelen >= static_cast<int>(sizeof(sockaddr_in6))) {
+        const auto *sin6 = reinterpret_cast<const sockaddr_in6 *>(name);
+        if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr))
+            return Route::Direct;
+        // IPv4 в IPv6 (::ffff:a.b.c.d) тоже пошёл бы мимо прокси.
+        return isStreamSocket(s) ? Route::Block : Route::Direct;
+    }
+    return Route::Direct;
+}
+
+int tunnel(SOCKET s, const sockaddr_in &target)
+{
+    // Регистрация событий клиента — снять на время рукопожатия, иначе
+    // клиент получит FD_CONNECT/FD_READ на байты прокси.
+    WSAEVENT event = nullptr;
+    long mask = 0;
+    EnterCriticalSection(&g_sockCs);
+    if (SockInfo *e = findSock(s, false)) {
+        event = e->event;
+        mask = e->mask;
+        e->tunneled = false;
+        e->fdConnectDue = false;
+        e->connectInFlight = false;
+    }
+    LeaveCriticalSection(&g_sockCs);
+    if (event)
+        g_eventSelect(s, nullptr, 0); // сокет остаётся неблокирующим
+
+    char targetIp[INET_ADDRSTRLEN] = {};
+    inet_ntop(AF_INET, &target.sin_addr, targetIp, sizeof(targetIp));
+    const unsigned targetPort = ntohs(target.sin_port);
+    g_shared->targetAddr = target.sin_addr.s_addr;
+    g_shared->targetPort = target.sin_port;
+
+    const DWORD deadline = GetTickCount() + kHandshakeTimeoutMs;
+    bool wouldBlock = false;
+    HsResult hs;
+    sockaddr_in proxy;
+    if (!resolveProxy(proxy)) {
+        hs = {WSAEHOSTUNREACH, L"не удалось разрешить адрес прокси"};
+    } else if (g_connect(s, reinterpret_cast<const sockaddr *>(&proxy), sizeof(proxy)) == SOCKET_ERROR) {
+        const int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            wouldBlock = true;
+            if (const int e = waitReady(s, true, deadline))
+                hs = {e, L"подключение к прокси"};
+        } else {
+            hs = {err, L"подключение к прокси"};
         }
     }
-    resp[received] = '\0';
-
-    // Проверяем статус 200 (например, "HTTP/1.1 200 Connection established")
-    if (strstr(resp, " 200 ") != nullptr || strstr(resp, " 200\r\n") != nullptr)
-        return true;
-
-    return false;
-}
-
-// ── Основная логика маршрутизации сокета ─────────────────────────────────────
-int routeSocketConnection(SOCKET s, const struct sockaddr *name, int namelen) {
-    if (!name || namelen < sizeof(sockaddr_in))
-        return g_origConnect(s, name, namelen);
-
-    const auto *targetSin = reinterpret_cast<const sockaddr_in *>(name);
-
-    // Только IPv4 TCP
-    if (targetSin->sin_family != AF_INET)
-        return g_origConnect(s, name, namelen);
-
-    // Локальные адреса (127.x.x.x) пропускаются напрямую без модификаций
-    const uint32_t ipBytes = ntohl(targetSin->sin_addr.s_addr);
-    if ((ipBytes >> 24) == 127 || targetSin->sin_addr.s_addr == INADDR_ANY)
-        return g_origConnect(s, name, namelen);
-
-    // Если прокси выключен лаунчером (Direct) — обычное прямое подключение
-    if (!g_cfg || g_cfg->magic != rfvk_proxy::kMagic
-        || g_cfg->type == static_cast<uint32_t>(rfvk_proxy::ProxyType::Direct)) {
-        return g_origConnect(s, name, namelen);
+    if (hs.err == 0) {
+        hs = g_conf.type == px::ProxyType::HttpConnect ? httpConnect(s, target, deadline)
+                                                       : socks5(s, target, deadline);
     }
 
-    // Запоминаем целевой хост и порт для лаунчера
-    const char *targetStr = inet_ntoa(targetSin->sin_addr);
-    if (targetStr)
-        strncpy_s(g_cfg->targetHost, targetStr, _TRUNCATE);
-    g_cfg->targetPort = ntohs(targetSin->sin_port);
+    if (hs.err == 0) {
+        InterlockedIncrement(reinterpret_cast<volatile LONG *>(&g_shared->connectionsCount));
+        setStatus(px::TunnelActive, 0, L"Туннель: %hs:%u → %hs:%u",
+                  g_conf.host, g_conf.port, targetIp, targetPort);
+    } else {
+        setStatus(px::TunnelError, hs.err, L"Прокси %hs:%u → %hs:%u: %ls (код %d)",
+                  g_conf.host, g_conf.port, targetIp, targetPort, hs.what, hs.err);
+    }
 
-    // Определяем адрес прокси-сервера
-    sockaddr_in proxySin = {};
-    if (!resolveProxy(g_cfg->proxyHost, g_cfg->proxyPort, proxySin)) {
-        g_cfg->state = rfvk_proxy::StateError;
-        g_cfg->lastError = WSAEHOSTUNREACH;
-        _snwprintf_s(g_cfg->statusText, countOf(g_cfg->statusText), _TRUNCATE,
-                     L"Не удалось разрешить адрес прокси %hs", g_cfg->proxyHost);
-        WSASetLastError(WSAEHOSTUNREACH);
+    EnterCriticalSection(&g_sockCs);
+    SockInfo *e = findSock(s, true);
+    if (e && hs.err == 0) {
+        e->tunneled = true;
+        e->peer = target;
+    }
+    const bool viaEvent = event && (mask & FD_CONNECT);
+    if (e && viaEvent) {
+        e->fdConnectDue = true;
+        e->fdConnectError = hs.err;
+    } else if (e && wouldBlock && hs.err == 0) {
+        e->connectInFlight = true; // FD_CONNECT — если клиент зарегистрирует события позже
+    }
+    LeaveCriticalSection(&g_sockCs);
+
+    if (event) {
+        g_eventSelect(s, event, mask);
+        if (viaEvent) {
+            // Клиент ждёт FD_CONNECT: итог — в WSAEnumNetworkEvents.
+            SetEvent(event);
+            WSASetLastError(WSAEWOULDBLOCK);
+            return SOCKET_ERROR;
+        }
+    }
+    if (hs.err) {
+        WSASetLastError(hs.err);
         return SOCKET_ERROR;
     }
-
-    // Устанавливаем таймаут 5 секунд на время рукопожатия, чтобы не зависать
-    DWORD timeoutMs = 5000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeoutMs), sizeof(timeoutMs));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeoutMs), sizeof(timeoutMs));
-
-    // Подключаемся к прокси-серверу через оригинальный connect
-    int rc = g_origConnect(s, reinterpret_cast<const struct sockaddr *>(&proxySin), sizeof(proxySin));
-    if (rc != 0) {
-        int err = WSAGetLastError();
-        g_cfg->state = rfvk_proxy::StateError;
-        g_cfg->lastError = err;
-        _snwprintf_s(g_cfg->statusText, countOf(g_cfg->statusText), _TRUNCATE,
-                     L"Сбой подключения к прокси %hs:%u (код %d)", g_cfg->proxyHost, g_cfg->proxyPort, err);
+    if (wouldBlock) {
+        // Неблокирующий сокет: select() на запись сразу покажет готовность.
+        WSASetLastError(WSAEWOULDBLOCK);
         return SOCKET_ERROR;
     }
+    return 0;
+}
 
-    // Выполняем рукопожатие туннеля
-    bool handshakeOk = false;
-    if (g_cfg->type == static_cast<uint32_t>(rfvk_proxy::ProxyType::Socks5)) {
-        handshakeOk = performSocks5Handshake(s, *targetSin);
-    } else if (g_cfg->type == static_cast<uint32_t>(rfvk_proxy::ProxyType::HttpConnect)) {
-        handshakeOk = performHttpConnectHandshake(s, *targetSin);
-    }
+// ─────────────────────────── обработчики ────────────────────────────────────
 
-    // Восстанавливаем дефолтный таймаут сокета
-    DWORD zero = 0;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&zero), sizeof(zero));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&zero), sizeof(zero));
-
-    if (!handshakeOk) {
-        g_cfg->state = rfvk_proxy::StateError;
-        g_cfg->lastError = WSAECONNREFUSED;
-        _snwprintf_s(g_cfg->statusText, countOf(g_cfg->statusText), _TRUNCATE,
-                     L"Ошибка рукопожатия через прокси %hs:%u", g_cfg->proxyHost, g_cfg->proxyPort);
-        WSASetLastError(WSAECONNREFUSED);
+int WSAAPI hkConnect(SOCKET s, const sockaddr *name, int namelen)
+{
+    switch (classify(s, name, namelen)) {
+    case Route::Proxy:
+        return tunnel(s, *reinterpret_cast<const sockaddr_in *>(name));
+    case Route::Block:
+        WSASetLastError(WSAENETUNREACH);
         return SOCKET_ERROR;
+    case Route::Direct:
+        break;
     }
-
-    // Сохраняем исходный целевой адрес сокета для прозрачной работы getpeername
-    setTrackedPeer(s, *targetSin);
-
-    // Успех!
-    g_cfg->state = rfvk_proxy::StateActive;
-    g_cfg->lastError = 0;
-    InterlockedIncrement(reinterpret_cast<volatile LONG *>(&g_cfg->connectionsCount));
-    _snwprintf_s(g_cfg->statusText, countOf(g_cfg->statusText), _TRUNCATE,
-                 L"Туннель активен: %hs:%u → %hs:%u", g_cfg->proxyHost, g_cfg->proxyPort,
-                 g_cfg->targetHost, g_cfg->targetPort);
-
-    return 0; // Успешное установление соединения
+    return g_connect(s, name, namelen);
 }
 
-// ── Перехваченные функции Winsock ───────────────────────────────────────────
-
-int WSAAPI Hooked_connect(SOCKET s, const struct sockaddr *name, int namelen) {
-    return routeSocketConnection(s, name, namelen);
+int WSAAPI hkWSAConnect(SOCKET s, const sockaddr *name, int namelen, LPWSABUF callerData,
+                        LPWSABUF calleeData, LPQOS sqos, LPQOS gqos)
+{
+    switch (classify(s, name, namelen)) {
+    case Route::Proxy:
+        // Данные соединения и QoS через прокси не передать (TCP их и не поддерживает).
+        if (calleeData)
+            calleeData->len = 0;
+        return tunnel(s, *reinterpret_cast<const sockaddr_in *>(name));
+    case Route::Block:
+        WSASetLastError(WSAENETUNREACH);
+        return SOCKET_ERROR;
+    case Route::Direct:
+        break;
+    }
+    return g_wsaConnect(s, name, namelen, callerData, calleeData, sqos, gqos);
 }
 
-int WSAAPI Hooked_WSAConnect(SOCKET s, const struct sockaddr *name, int namelen,
-                             LPWSABUF lpCallerData, LPWSABUF lpCalleeData,
-                             LPQOS lpSQOS, LPQOS lpGQOS) {
-    return routeSocketConnection(s, name, namelen);
-}
-
-int WSAAPI Hooked_getpeername(SOCKET s, struct sockaddr *name, int *namelen) {
-    if (name && namelen && *namelen >= sizeof(sockaddr_in)) {
-        sockaddr_in tracked;
-        if (getTrackedPeer(s, tracked)) {
-            memcpy(name, &tracked, sizeof(sockaddr_in));
-            *namelen = sizeof(sockaddr_in);
+int WSAAPI hkGetPeerName(SOCKET s, sockaddr *name, int *namelen)
+{
+    if (name && namelen && *namelen >= static_cast<int>(sizeof(sockaddr_in))) {
+        EnterCriticalSection(&g_sockCs);
+        const SockInfo *e = findSock(s, false);
+        const bool tunneled = e && e->tunneled;
+        const sockaddr_in peer = tunneled ? e->peer : sockaddr_in{};
+        LeaveCriticalSection(&g_sockCs);
+        if (tunneled) {
+            std::memcpy(name, &peer, sizeof(peer));
+            *namelen = sizeof(peer);
             return 0;
         }
     }
-    return g_origGetPeerName(s, name, namelen);
+    return g_getPeerName(s, name, namelen);
 }
 
-int WSAAPI Hooked_closesocket(SOCKET s) {
-    removeTrackedPeer(s);
-    return g_origCloseSocket(s);
+int WSAAPI hkCloseSocket(SOCKET s)
+{
+    EnterCriticalSection(&g_sockCs);
+    if (SockInfo *e = findSock(s, false))
+        *e = SockInfo{};
+    LeaveCriticalSection(&g_sockCs);
+    return g_closeSocket(s);
 }
 
-// ── Инициализация перехватов ────────────────────────────────────────────────
-void initHooks() {
-    InitializeCriticalSection(&g_cs);
-    for (int i = 0; i < kMaxTrackedSockets; ++i) {
-        g_peers[i].s = INVALID_SOCKET;
-    }
-
-    HMODULE hWs2 = GetModuleHandleW(L"ws2_32.dll");
-    if (!hWs2)
-        hWs2 = LoadLibraryW(L"ws2_32.dll");
-    if (!hWs2)
-        return;
-
-    void *pConnect = GetProcAddress(hWs2, "connect");
-    void *pWSAConnect = GetProcAddress(hWs2, "WSAConnect");
-    void *pGetPeerName = GetProcAddress(hWs2, "getpeername");
-    void *pCloseSocket = GetProcAddress(hWs2, "closesocket");
-
-    if (pConnect) {
-        g_trampConnect = installHook(pConnect, reinterpret_cast<void *>(Hooked_connect));
-        g_origConnect = reinterpret_cast<FnConnect>(g_trampConnect);
-    }
-    if (pWSAConnect) {
-        g_trampWSAConnect = installHook(pWSAConnect, reinterpret_cast<void *>(Hooked_WSAConnect));
-        g_origWSAConnect = reinterpret_cast<FnWSAConnect>(g_trampWSAConnect);
-    }
-    if (pGetPeerName) {
-        g_trampGetPeerName = installHook(pGetPeerName, reinterpret_cast<void *>(Hooked_getpeername));
-        g_origGetPeerName = reinterpret_cast<FnGetPeerName>(g_trampGetPeerName);
-    }
-    if (pCloseSocket) {
-        g_trampCloseSocket = installHook(pCloseSocket, reinterpret_cast<void *>(Hooked_closesocket));
-        g_origCloseSocket = reinterpret_cast<FnCloseSocket>(g_trampCloseSocket);
-    }
-}
-
-void openSharedConfig() {
-    wchar_t mapName[64];
-    _snwprintf_s(mapName, countOf(mapName), _TRUNCATE, L"%ls%lu", rfvk_proxy::kMappingPrefix, GetCurrentProcessId());
-
-    g_mapHandle = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, mapName);
-    if (!g_mapHandle)
-        return;
-
-    g_cfg = static_cast<rfvk_proxy::SharedConfig *>(
-        MapViewOfFile(g_mapHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(rfvk_proxy::SharedConfig)));
-
-    if (g_cfg) {
-        if (g_cfg->magic != rfvk_proxy::kMagic || g_cfg->version != rfvk_proxy::kVersion) {
-            UnmapViewOfFile(g_cfg);
-            g_cfg = nullptr;
-        } else {
-            g_cfg->state = rfvk_proxy::StateInit;
-            _snwprintf_s(g_cfg->statusText, countOf(g_cfg->statusText), _TRUNCATE,
-                         L"rfvk_proxy.dll загружен (PID %lu)", GetCurrentProcessId());
+int WSAAPI hkWSAEventSelect(SOCKET s, WSAEVENT event, long mask)
+{
+    const int rc = g_eventSelect(s, event, mask);
+    if (rc != 0)
+        return rc;
+    bool signal = false;
+    EnterCriticalSection(&g_sockCs);
+    // Без свободной записи регистрация не запомнится, и туннель на этом
+    // сокете не сможет её восстановить — тогда tunnel() вернёт обычный итог.
+    if (SockInfo *e = findSock(s, event != nullptr && mask != 0)) {
+        e->event = mask ? event : nullptr;
+        e->mask = mask;
+        if (e->connectInFlight && e->event && (mask & FD_CONNECT)) {
+            e->connectInFlight = false;
+            e->fdConnectDue = true;
+            e->fdConnectError = 0;
+            signal = true;
         }
     }
+    LeaveCriticalSection(&g_sockCs);
+    if (signal)
+        SetEvent(event);
+    return rc;
+}
+
+int WSAAPI hkWSAEnumNetworkEvents(SOCKET s, WSAEVENT event, LPWSANETWORKEVENTS events)
+{
+    const int rc = g_enumEvents(s, event, events);
+    if (rc != 0 || !events)
+        return rc;
+    EnterCriticalSection(&g_sockCs);
+    if (SockInfo *e = findSock(s, false); e && e->fdConnectDue) {
+        e->fdConnectDue = false;
+        events->lNetworkEvents |= FD_CONNECT;
+        events->iErrorCode[FD_CONNECT_BIT] = e->fdConnectError;
+    }
+    LeaveCriticalSection(&g_sockCs);
+    return rc;
+}
+
+// ─────────────────────────── установка ──────────────────────────────────────
+
+struct HookDef {
+    const char *name;
+    void *detour;
+    void **original;
+};
+
+bool installHooks()
+{
+    HMODULE ws2 = GetModuleHandleW(L"ws2_32.dll"); // клиент импортирует её статически
+    if (!ws2)
+        return false;
+    const HookDef hooks[] = {
+        {"connect", reinterpret_cast<void *>(hkConnect), reinterpret_cast<void **>(&g_connect)},
+        {"WSAConnect", reinterpret_cast<void *>(hkWSAConnect), reinterpret_cast<void **>(&g_wsaConnect)},
+        {"getpeername", reinterpret_cast<void *>(hkGetPeerName), reinterpret_cast<void **>(&g_getPeerName)},
+        {"closesocket", reinterpret_cast<void *>(hkCloseSocket), reinterpret_cast<void **>(&g_closeSocket)},
+        {"WSAEventSelect", reinterpret_cast<void *>(hkWSAEventSelect), reinterpret_cast<void **>(&g_eventSelect)},
+        {"WSAEnumNetworkEvents", reinterpret_cast<void *>(hkWSAEnumNetworkEvents),
+         reinterpret_cast<void **>(&g_enumEvents)},
+    };
+    // Сначала — адреса оригиналов, чтобы обработчик, сработавший сразу после
+    // установки своего перехвата, не наткнулся на пустой указатель соседнего.
+    void *targets[ARRAYSIZE(hooks)];
+    for (size_t i = 0; i < ARRAYSIZE(hooks); ++i) {
+        targets[i] = reinterpret_cast<void *>(GetProcAddress(ws2, hooks[i].name));
+        if (!targets[i])
+            return false;
+        *hooks[i].original = static_cast<std::uint8_t *>(targets[i]) + 2;
+    }
+    for (size_t i = 0; i < ARRAYSIZE(hooks); ++i) {
+        if (!hotpatch(targets[i], hooks[i].detour))
+            return false; // уже стоящие перехваты рабочие; лаунчер закроет клиент
+    }
+    return true;
+}
+
+bool isLoopback4(DWORD addr)
+{
+    return (ntohl(addr) >> 24) == 127 || addr == 0;
+}
+
+// Есть ли у процесса TCP-соединения к нелокальным адресам — открытые до
+// установки перехватов, то есть мимо прокси.
+bool hasDirectConnections()
+{
+    const DWORD pid = GetCurrentProcessId();
+    const ULONG families[] = {AF_INET, AF_INET6};
+    for (ULONG family : families) {
+        DWORD size = 0;
+        GetExtendedTcpTable(nullptr, &size, FALSE, family, TCP_TABLE_OWNER_PID_ALL, 0);
+        if (size == 0)
+            continue;
+        size += 4096; // таблица может вырасти между вызовами
+        auto *buf = static_cast<std::uint8_t *>(HeapAlloc(GetProcessHeap(), 0, size));
+        if (!buf)
+            return true; // проверить нечем — считаем, что утечка есть
+        bool leaked = false;
+        if (GetExtendedTcpTable(buf, &size, FALSE, family, TCP_TABLE_OWNER_PID_ALL, 0) != NO_ERROR) {
+            leaked = true;
+        } else if (family == AF_INET) {
+            const auto *t = reinterpret_cast<MIB_TCPTABLE_OWNER_PID *>(buf);
+            for (DWORD i = 0; i < t->dwNumEntries && !leaked; ++i) {
+                const auto &r = t->table[i];
+                leaked = r.dwOwningPid == pid && r.dwState != MIB_TCP_STATE_LISTEN
+                      && !isLoopback4(r.dwRemoteAddr);
+            }
+        } else {
+            const auto *t = reinterpret_cast<MIB_TCP6TABLE_OWNER_PID *>(buf);
+            static const std::uint8_t kLoop6[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+            static const std::uint8_t kAny6[16] = {};
+            for (DWORD i = 0; i < t->dwNumEntries && !leaked; ++i) {
+                const auto &r = t->table[i];
+                leaked = r.dwOwningPid == pid && r.dwState != MIB_TCP_STATE_LISTEN
+                      && std::memcmp(r.ucRemoteAddr, kLoop6, 16) != 0
+                      && std::memcmp(r.ucRemoteAddr, kAny6, 16) != 0;
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, buf);
+        if (leaked)
+            return true;
+    }
+    return false;
+}
+
+// Проверка соединений — вне DllMain (iphlpapi под блокировкой загрузчика
+// звать нельзя). Перехваты к этому моменту уже стоят, новых утечек нет.
+DWORD WINAPI verifyThread(void *)
+{
+    if (hasDirectConnections())
+        setHookStatus(px::HookLeaked, L"Клиент соединился напрямую до подключения прокси");
+    else
+        setHookStatus(px::HookOk, L"Перехват сети установлен");
+    return 0;
 }
 
 } // namespace
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
-    switch (ul_reason_for_call) {
-    case DLL_PROCESS_ATTACH:
-        DisableThreadLibraryCalls(hModule);
-        openSharedConfig();
-        initHooks();
-        break;
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
+{
+    if (reason != DLL_PROCESS_ATTACH)
+        return TRUE; // при выходе процесса ОС всё освободит сама
+    DisableThreadLibraryCalls(module);
+    InitializeCriticalSection(&g_statusCs);
+    InitializeCriticalSection(&g_sockCs);
+    InitializeCriticalSection(&g_resolveCs);
+    for (auto &e : g_socks)
+        e.s = INVALID_SOCKET;
 
-    case DLL_PROCESS_DETACH:
-        if (g_cfg) {
-            UnmapViewOfFile(g_cfg);
-            g_cfg = nullptr;
-        }
-        if (g_mapHandle) {
-            CloseHandle(g_mapHandle);
-            g_mapHandle = nullptr;
-        }
-        DeleteCriticalSection(&g_cs);
-        break;
+    if (!openSharedConfig() || g_conf.type == px::ProxyType::Direct)
+        return TRUE; // без настроек ничего не перехватываем
+
+    // Перехваты ссылаются на код библиотеки — выгружать её нельзя никогда.
+    HMODULE pinned = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                       reinterpret_cast<LPCWSTR>(&DllMain), &pinned);
+
+    if (!installHooks()) {
+        setHookStatus(px::HookFailed, L"Не удалось перехватить функции ws2_32.dll");
+        return TRUE;
     }
+    if (HANDLE t = CreateThread(nullptr, 0, verifyThread, nullptr, 0, nullptr))
+        CloseHandle(t);
+    else
+        setHookStatus(px::HookFailed, L"Не удалось запустить проверку соединений");
     return TRUE;
 }

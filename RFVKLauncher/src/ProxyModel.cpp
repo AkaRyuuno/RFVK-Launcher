@@ -22,7 +22,7 @@ QVariant ProxyModel::data(const QModelIndex &index, int role) const
     case NameRole:
         return s.name;
     case TypeRole:
-        return s.type;
+        return static_cast<int>(s.type);
     case TypeNameRole:
         return s.typeName();
     case HostRole:
@@ -33,18 +33,18 @@ QVariant ProxyModel::data(const QModelIndex &index, int role) const
         return s.authEnabled;
     case UsernameRole:
         return s.username;
-    case PasswordRole:
-        return s.password;
     case ActiveClientsRole:
         return s.activeClients();
     case MaxClientsRole:
-        return s.maxClients;
+        return kMaxClientsPerSlot;
     case CapacityStringRole:
         return s.capacityString();
     case IsFullRole:
         return s.isFull();
     case PingMsRole:
         return s.pingMs;
+    case TestOkRole:
+        return s.testOk;
     case LastStatusRole:
         return s.lastStatus;
     case EnabledRole:
@@ -57,6 +57,10 @@ QVariant ProxyModel::data(const QModelIndex &index, int role) const
             list.append(pid);
         return list;
     }
+    case SourceIdRole:
+        return s.sourceId;
+    case SourceNameRole:
+        return s.sourceName;
     default:
         return {};
     }
@@ -73,16 +77,18 @@ QHash<int, QByteArray> ProxyModel::roleNames() const
         {PortRole, "port"},
         {AuthEnabledRole, "authEnabled"},
         {UsernameRole, "username"},
-        {PasswordRole, "password"},
         {ActiveClientsRole, "activeClients"},
         {MaxClientsRole, "maxClients"},
         {CapacityStringRole, "capacityString"},
         {IsFullRole, "isFull"},
         {PingMsRole, "pingMs"},
+        {TestOkRole, "testOk"},
         {LastStatusRole, "lastStatus"},
         {EnabledRole, "enabled"},
         {IsDirectRole, "isDirect"},
-        {ActivePidsRole, "activePids"}
+        {ActivePidsRole, "activePids"},
+        {SourceIdRole, "sourceId"},
+        {SourceNameRole, "sourceName"}
     };
     return roles;
 }
@@ -126,11 +132,4 @@ void ProxyModel::removeSlot(int row)
     beginRemoveRows(QModelIndex(), row, row);
     m_slots.removeAt(row);
     endRemoveRows();
-}
-
-void ProxyModel::notifySlotChanged(int row)
-{
-    if (row < 0 || row >= m_slots.size())
-        return;
-    emit dataChanged(index(row), index(row));
 }

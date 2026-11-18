@@ -8,9 +8,9 @@ Popup {
     id: dlg
     property bool isEdit: false
     property string editSlotId: ""
-    property string testResultText: ""
-    property int testResultPing: -1
-    property bool testing: false
+    // Проверка в диалоге: "" — не было, "testing", "ok", "error".
+    property string testState: ""
+    property string testText: ""
 
     modal: true
     anchors.centerIn: Overlay.overlay
@@ -27,36 +27,36 @@ Popup {
         border.color: Theme.border
     }
 
-    // Слушатель результатов проверки соединения
     Connections {
         target: ProxyManager
         function onCustomTestFinished(ok, pingMs, message) {
-            dlg.testing = false
-            dlg.testResultPing = pingMs
-            if (ok) {
-                dlg.testResultText = "Соединение успешно (" + pingMs + " мс)"
-            } else {
-                dlg.testResultText = message.length > 0 ? ("Ошибка: " + message) : "Не удалось подключиться к прокси"
-            }
+            if (dlg.testState !== "testing")
+                return // диалог закрыли или открыли заново
+            dlg.testState = ok ? "ok" : "error"
+            dlg.testText = ok ? Strings.proxyTestOk(pingMs, message) : Strings.proxyTestFailed(message)
         }
+    }
+
+    function reset() {
+        dlg.testState = ""
+        dlg.testText = ""
+        passField.text = ""
     }
 
     function openAdd(withAuth) {
         dlg.isEdit = false
         dlg.editSlotId = ""
-        nameField.text = "Proxy " + (ProxyManager.model.rowCount() || 1)
+        nameField.text = ""
         typeSelect.currentIndex = 0 // SOCKS5
         hostField.text = ""
         portField.text = "1080"
         authToggle.checked = !!withAuth
         userField.text = ""
-        passField.text = ""
-        dlg.testResultText = ""
-        dlg.testResultPing = -1
-        dlg.testing = false
+        reset()
         dlg.open()
     }
 
+    // Пароль в интерфейс не отдаётся: пустое поле при сохранении — оставить прежний.
     function openEdit(slot) {
         dlg.isEdit = true
         dlg.editSlotId = slot.slotId
@@ -66,74 +66,41 @@ Popup {
         portField.text = slot.port.toString()
         authToggle.checked = slot.authEnabled
         userField.text = slot.username
-        passField.text = slot.password
-        dlg.testResultText = ""
-        dlg.testResultPing = -1
-        dlg.testing = false
+        reset()
         dlg.open()
     }
 
-    function runTest() {
-        var host = hostField.text.trim()
-        var port = parseInt(portField.text.trim(), 10)
-        if (!host.length || isNaN(port) || port <= 0 || port > 65535) {
-            dlg.testResultPing = -2
-            dlg.testResultText = "Укажите корректный хост и порт (1–65535)"
-            return
-        }
-        dlg.testing = true
-        dlg.testResultText = Strings.proxyTesting
-        dlg.testResultPing = -1
-        ProxyManager.testCustomProxy(
-            typeSelect.currentValue,
-            host,
-            port,
-            authToggle.checked,
-            userField.text.trim(),
-            passField.text
-        )
+    function fail(text) {
+        dlg.testState = "error"
+        dlg.testText = text
     }
 
-    function save() {
-        var name = nameField.text.trim()
-        var host = hostField.text.trim()
-        var port = parseInt(portField.text.trim(), 10)
-        if (!name.length) name = "Proxy " + host
-        if (!host.length) {
-            dlg.testResultPing = -2
-            dlg.testResultText = "Хост не может быть пустым"
-            return
-        }
-        if (isNaN(port) || port <= 0 || port > 65535) {
-            dlg.testResultPing = -2
-            dlg.testResultText = "Некорректный порт (1–65535)"
-            return
-        }
+    // Порт из поля или NaN (поле проверяет IntValidator, но может быть пустым).
+    function port() {
+        var p = parseInt(portField.text.trim(), 10)
+        return (isNaN(p) || p <= 0 || p > 65535) ? NaN : p
+    }
 
-        if (dlg.isEdit) {
-            ProxyManager.updateProxy(
-                dlg.editSlotId,
-                name,
-                typeSelect.currentValue,
-                host,
-                port,
-                authToggle.checked,
-                userField.text.trim(),
-                passField.text,
-                true
-            )
-        } else {
-            ProxyManager.addProxy(
-                name,
-                typeSelect.currentValue,
-                host,
-                port,
-                authToggle.checked,
-                userField.text.trim(),
-                passField.text
-            )
-        }
-        dlg.close()
+    function runTest() {
+        if (!hostField.text.trim().length || isNaN(port()))
+            return fail(Strings.proxyBadHostPort)
+        dlg.testState = "testing"
+        dlg.testText = Strings.proxyTesting
+        ProxyManager.testCustomProxy(typeSelect.currentValue, hostField.text, port(), authToggle.checked,
+                                     userField.text, passField.text, dlg.editSlotId)
+    }
+
+    // Проверку данных повторяет ProxyManager; при ошибке он покажет тост, и диалог останется открытым.
+    function save() {
+        if (!hostField.text.trim().length || isNaN(port()))
+            return fail(Strings.proxyBadHostPort)
+        var ok = dlg.isEdit
+            ? ProxyManager.updateProxy(dlg.editSlotId, nameField.text, typeSelect.currentValue, hostField.text,
+                                       port(), authToggle.checked, userField.text, passField.text)
+            : ProxyManager.addProxy(nameField.text, typeSelect.currentValue, hostField.text, port(),
+                                    authToggle.checked, userField.text, passField.text) !== ""
+        if (ok)
+            dlg.close()
     }
 
     contentItem: Column {
@@ -168,7 +135,7 @@ Popup {
             AppField {
                 id: nameField
                 width: parent.width
-                placeholderText: "Например: Германия SOCKS5"
+                placeholderText: Strings.proxyNameHint
             }
         }
 
@@ -212,7 +179,7 @@ Popup {
             AppField {
                 id: hostField
                 width: parent.width
-                placeholderText: "192.168.1.1 или domain.com"
+                placeholderText: Strings.proxyHostHint
             }
         }
 
@@ -245,7 +212,7 @@ Popup {
                 AppField {
                     id: userField
                     Layout.fillWidth: true
-                    placeholderText: "Логин"
+                    placeholderText: Strings.proxyUser
                 }
             }
 
@@ -258,7 +225,7 @@ Popup {
                     id: passField
                     Layout.fillWidth: true
                     password: true
-                    placeholderText: "Пароль"
+                    placeholderText: dlg.isEdit ? Strings.proxyPassKeep : Strings.proxyPass
                 }
             }
         }
@@ -273,17 +240,17 @@ Popup {
                 kind: "outline"
                 iconName: "refresh"
                 text: Strings.proxyTest
-                enabled: !dlg.testing
+                enabled: dlg.testState !== "testing"
                 onClicked: dlg.runTest()
             }
 
             AppText {
                 Layout.fillWidth: true
-                text: dlg.testResultText
+                text: dlg.testText
                 role: "small"
                 elide: Text.ElideRight
-                color: dlg.testResultPing >= 0 ? Theme.ok
-                     : dlg.testResultPing === -2 ? Theme.err
+                color: dlg.testState === "ok" ? Theme.ok
+                     : dlg.testState === "error" ? Theme.err
                      : Theme.muted
             }
         }
