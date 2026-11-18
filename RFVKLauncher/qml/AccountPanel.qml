@@ -250,17 +250,21 @@ Item {
                     AppText {
                         text: Strings.slotSelectorLabel
                         role: "bodyStrong"
+                        width: parent.width
+                        elide: Text.ElideRight
                     }
                     AppText {
                         text: Strings.slotSelectorHint
                         role: "caption"
                         color: Theme.muted
+                        width: parent.width
+                        wrapMode: Text.WordWrap
                     }
                 }
 
                 AppSelect {
                     id: slotSelect
-                    Layout.preferredWidth: 260
+                    Layout.preferredWidth: Math.min(260, slotRow.width / 2)
                     // «Авто» — первым пунктом, дальше слоты из ProxyManager.
                     model: [{ label: Strings.slotAuto, value: "auto" }].concat(ProxyManager.slotOptions)
 

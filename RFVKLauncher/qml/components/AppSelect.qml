@@ -28,11 +28,10 @@ ComboBox {
         Behavior on border.color { ColorAnimation { duration: 100 } }
     }
 
-    contentItem: AppText {
+    contentItem: ButtonLabel {
         text: control.displayText
         role: "body"
         color: control.enabled ? Theme.text : Theme.muted
-        verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
     }
 
@@ -53,11 +52,10 @@ ComboBox {
         height: 36
         leftPadding: Theme.s12
         highlighted: control.highlightedIndex === index
-        contentItem: AppText {
+        contentItem: ButtonLabel {
             text: row.modelData.label
             role: "body"
             color: control.currentIndex === row.index ? Theme.accentText : Theme.text
-            verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
         }
         background: Rectangle {

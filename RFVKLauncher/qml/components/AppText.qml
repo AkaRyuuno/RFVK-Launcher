@@ -7,7 +7,7 @@ Text {
     property string role: "body"
 
     color: Theme.text
-    renderType: Text.NativeRendering
+    renderType: Text.QtRendering
     font.family: role === "mono" ? Theme.fontMono
                : (role === "display" || role === "title" || role === "h2" || role === "h3") ? Theme.fontH
                : Theme.fontUI
@@ -52,5 +52,5 @@ Text {
     }
     lineHeightMode: Text.ProportionalHeight
     font.capitalization: role === "overline" ? Font.AllUppercase : Font.MixedCase
-    font.letterSpacing: role === "overline" ? font.pixelSize * 0.08 : 0
+    font.letterSpacing: role === "overline" ? 0.88 : 0
 }

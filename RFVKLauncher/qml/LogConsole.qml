@@ -12,17 +12,59 @@ Rectangle {
     border.color: Theme.border
     clip: true
 
-    ListModel { id: logModel }
+    readonly property alias textHasFocus: editor.activeFocus
+    property var entries: []
 
-    function color4(level) {
-        return level === 1 ? Theme.ok : level === 2 ? Theme.err : Theme.text
+    function escapeHtml(text) {
+        return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                   .replace(/\r\n|\r|\n/g, "<br>")
+    }
+
+    function formatEntry(entry) {
+        const color = entry.level === 1 ? Theme.ok : entry.level === 2 ? Theme.err : Theme.text
+        const marker = entry.level === 1 ? "✓" : entry.level === 2 ? "✕" : "·"
+        return '<p style="margin: 0; white-space: pre-wrap"><span style="color: ' + Theme.muted
+               + '">' + escapeHtml(entry.time) + '</span><span style="color: ' + color
+               + '"> ' + marker + ' ' + escapeHtml(entry.text) + '</span></p>'
+    }
+
+    function scrollToEnd() {
+        if (editor.selectionStart === editor.selectionEnd)
+            view.contentY = Math.max(0, view.contentHeight - view.height)
     }
 
     Connections {
         target: App
         function onLogLine(time, text, level) {
-            logModel.append({ t: time, m: text, lvl: level })
-            listView.positionViewAtEnd()
+            const start = editor.selectionStart
+            const end = editor.selectionEnd
+            const follow = start === end && (view.atYEnd || !editor.length)
+            const scrollPosition = view.contentY
+            const entry = { time: time, text: text, level: level }
+            root.entries.push(entry)
+            editor.append(root.formatEntry(entry))
+
+            if (start !== end)
+                editor.select(start, end)
+            if (follow) {
+                Qt.callLater(root.scrollToEnd)
+            } else {
+                view.contentY = scrollPosition
+            }
+        }
+    }
+
+    Connections {
+        target: Theme
+        function onDarkChanged() {
+            if (!editor.length)
+                return
+            const start = editor.selectionStart
+            const end = editor.selectionEnd
+            const scrollPosition = view.contentY
+            editor.text = root.entries.map(root.formatEntry).join("")
+            editor.select(start, end)
+            view.contentY = scrollPosition
         }
     }
 
@@ -31,6 +73,7 @@ Rectangle {
 
         // Шапка консоли.
         Item {
+            id: header
             width: parent.width
             height: 36
             Row {
@@ -47,54 +90,77 @@ Rectangle {
                 kind: "ghost"
                 text: Strings.clear
                 fontRole: "small"
-                onClicked: logModel.clear()
+                onClicked: {
+                    root.entries = []
+                    editor.clear()
+                    view.contentY = 0
+                }
             }
             Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.border }
         }
 
-        ListView {
-            id: listView
+        Flickable {
+            id: view
             width: parent.width
-            height: parent.height - 36
+            height: parent.height - header.height
             clip: true
-            model: logModel
-            topMargin: Theme.s8
-            bottomMargin: Theme.s8
-            leftMargin: Theme.s12
-            rightMargin: Theme.s12
+            contentWidth: width
+            contentHeight: editor.height
+            flickableDirection: Flickable.VerticalFlick
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            delegate: Row {
-                required property string t
-                required property string m
-                required property int lvl
-                width: ListView.view.width - Theme.s12 * 2
-                spacing: Theme.s8
-                AppText { text: t; role: "mono"; color: Theme.muted }
-                // Маркер по уровню: ✓ успех, · обычная, ✕ ошибка.
-                AppText {
-                    width: 10
-                    text: lvl === 1 ? "✓" : lvl === 2 ? "✕" : "·"
-                    role: "mono"
-                    color: root.color4(lvl)
+            TextEdit {
+                id: editor
+                width: view.width
+                height: Math.max(view.height, contentHeight + topPadding + bottomPadding)
+                padding: Theme.s8
+                leftPadding: Theme.s12
+                rightPadding: Theme.s16
+                font.family: Theme.fontMono
+                font.pixelSize: 13
+                renderType: TextEdit.QtRendering
+                textFormat: TextEdit.RichText
+                wrapMode: TextEdit.Wrap
+                readOnly: true
+                selectByMouse: true
+                persistentSelection: true
+                color: Theme.text
+                selectionColor: Theme.accent
+                selectedTextColor: Theme.accentInk
+
+                TapHandler {
+                    acceptedButtons: Qt.RightButton
+                    enabled: editor.length > 0
+                    onTapped: (eventPoint) => {
+                        editor.forceActiveFocus(Qt.MouseFocusReason)
+                        logMenu.popup(editor, eventPoint.position.x, eventPoint.position.y)
+                    }
                 }
-                AppText {
-                    width: parent.width - 80
-                    text: m
-                    role: "mono"
-                    color: root.color4(lvl)
-                    wrapMode: Text.WordWrap
+                AppMenu {
+                    id: logMenu
+                    Action {
+                        text: Strings.textCopy
+                        enabled: editor.selectionStart !== editor.selectionEnd
+                        onTriggered: editor.copy()
+                    }
+                    Action {
+                        text: Strings.textSelectAll
+                        onTriggered: editor.selectAll()
+                    }
                 }
             }
 
-            // Пусто.
             AppText {
-                anchors.centerIn: parent
-                visible: logModel.count === 0
+                y: Math.round((view.height - height) / 2)
+                width: view.width - 2 * Theme.s12
+                x: Theme.s12
+                visible: !editor.length
                 text: Strings.logEmpty
                 role: "mono"
                 color: Theme.muted
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
             }
         }
     }

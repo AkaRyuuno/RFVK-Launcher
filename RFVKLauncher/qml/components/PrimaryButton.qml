@@ -62,7 +62,7 @@ AbstractButton {
                 color: control.fg
                 size: 18
             }
-            AppText {
+            ButtonLabel {
                 anchors.verticalCenter: parent.verticalCenter
                 text: control.busy && control.busyText.length ? control.busyText : control.text
                 role: "h3"
@@ -70,12 +70,11 @@ AbstractButton {
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: control.wrapText ? Text.WordWrap : Text.NoWrap
                 maximumLineCount: 2
-                lineHeight: control.wrapText ? 0.95 : 1.0
                 width: control.wrapText
                        ? control.width - 2 * Theme.s16 - (control.iconName.length ? 18 + Theme.s8 : 0)
                        : implicitWidth
             }
-            AppText {
+            ButtonLabel {
                 anchors.verticalCenter: parent.verticalCenter
                 visible: control.busy && control.counter.length > 0
                 text: control.counter

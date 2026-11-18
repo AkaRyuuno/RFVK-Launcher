@@ -258,25 +258,21 @@ Popup {
         Rectangle { width: parent.width; height: 1; color: Theme.border }
 
         // Подвал: кнопки Сохранить / Отмена
-        Item {
-            width: parent.width
-            height: Theme.hField
+        Row {
+            anchors.right: parent.right
+            spacing: Theme.s12
 
-            Row {
-                anchors.right: parent.right
-                spacing: Theme.s12
-
-                SecondaryButton {
-                    kind: "ghost"
-                    text: Strings.cancel
-                    onClicked: dlg.close()
-                }
-
-                PrimaryButton {
-                    text: dlg.isEdit ? Strings.proxySave : Strings.proxyAdd
-                    iconName: "check"
-                    onClicked: dlg.save()
-                }
+            SecondaryButton {
+                fontRole: "bodyStrong"
+                text: Strings.cancel
+                onClicked: dlg.close()
+            }
+            SecondaryButton {
+                kind: "accent"
+                fontRole: "bodyStrong"
+                text: dlg.isEdit ? Strings.proxySave : Strings.proxyAdd
+                iconName: "check"
+                onClicked: dlg.save()
             }
         }
     }

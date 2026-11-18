@@ -46,11 +46,13 @@ qt_add_qml_module(RFVKLauncher
         qml/SettingsDialog.qml
         qml/components/AppText.qml
         qml/components/AppToggle.qml
+        qml/components/ButtonLabel.qml
         qml/components/PrimaryButton.qml
         qml/components/SecondaryButton.qml
         qml/components/StatusBadge.qml
         qml/components/Spinner.qml
         qml/components/AppField.qml
+        qml/components/AppMenu.qml
         qml/components/AppSelect.qml
         qml/AutoLoginCard.qml
         qml/ProxyCard.qml
