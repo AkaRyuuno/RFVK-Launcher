@@ -53,7 +53,7 @@ namespace px = rfvk_proxy;
 
 namespace {
 
-constexpr DWORD kHandshakeTimeoutMs = 10000; // подключение к прокси + рукопожатие
+constexpr DWORD kHandshakeTimeoutMs = 15000; // подключение к прокси + рукопожатие
 constexpr int kMaxHttpHeader = 8192;         // ответ HTTP-прокси длиннее — ошибка
 constexpr int kMaxSockets = 256;             // отслеживаемые сокеты клиента
 
@@ -539,6 +539,8 @@ int tunnel(SOCKET s, const sockaddr_in &target)
     char targetIp[INET_ADDRSTRLEN] = {};
     inet_ntop(AF_INET, &target.sin_addr, targetIp, sizeof(targetIp));
     const unsigned targetPort = ntohs(target.sin_port);
+    g_shared->targetAddr = target.sin_addr.s_addr;
+    g_shared->targetPort = target.sin_port;
 
     const DWORD deadline = GetTickCount() + kHandshakeTimeoutMs;
     bool wouldBlock = false;

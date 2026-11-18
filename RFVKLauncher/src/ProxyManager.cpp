@@ -11,6 +11,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QUuid>
+#include <QtEndian>
 
 #include <cstring>
 #include <cwchar>
@@ -37,6 +38,23 @@ constexpr qint64 kConfirmTimeoutMs = 20000;     // подтверждение о
 const QString kListKey = QStringLiteral("proxy/list");
 const QString kAccountKey = QStringLiteral("proxy/account/");
 const QString kPasswordKey = QStringLiteral("passwordEnc");
+const QString kProbeKey = QStringLiteral("proxy/probeTarget");
+// Сервер входа RF Online (VK Play) — пока клиент ни разу не шёл через прокси.
+const QString kDefaultProbeTarget = QStringLiteral("212.233.94.210:27780");
+
+// «a.b.c.d:port» → адрес и порт; false — строка не IPv4:порт.
+bool parseTarget(const QString &text, QHostAddress &addr, quint16 &port)
+{
+    const int colon = text.lastIndexOf(QLatin1Char(':'));
+    bool ok = false;
+    const int p = text.mid(colon + 1).toInt(&ok);
+    QHostAddress a(text.left(colon));
+    if (colon < 0 || !ok || p <= 0 || p > 65535 || a.protocol() != QAbstractSocket::IPv4Protocol)
+        return false;
+    addr = a;
+    port = static_cast<quint16>(p);
+    return true;
+}
 
 ProxySlot directSlot()
 {
@@ -55,6 +73,8 @@ ProxyManager::ProxyManager(QObject *parent)
                  QStringLiteral("RFVKLauncher"))
 {
     loadSettings();
+    if (!parseTarget(m_settings.value(kProbeKey).toString(), m_probeTarget, m_probePort))
+        parseTarget(kDefaultProbeTarget, m_probeTarget, m_probePort);
     m_pollTimer.setInterval(kPollMs);
     connect(&m_pollTimer, &QTimer::timeout, this, &ProxyManager::poll);
 }
@@ -315,7 +335,7 @@ void ProxyManager::setProxyEnabled(const QString &id, bool enabled)
 
 void ProxyManager::runProbe(const ProxySlot &proxy, const std::function<void(bool, int, const QString &)> &done)
 {
-    auto *probe = new ProxyProbe(proxy, this);
+    auto *probe = new ProxyProbe(proxy, m_probeTarget, m_probePort, this);
     connect(probe, &ProxyProbe::finished, this, done);
     probe->start();
 }
@@ -331,15 +351,9 @@ void ProxyManager::testProxy(const QString &id)
     m_model.updateSlot(idx, s);
 
     runProbe(s, [this, id](bool ok, int pingMs, const QString &message) {
-        const int row = m_model.indexOfId(id);
-        if (row >= 0) {
-            ProxySlot upd = m_model.at(row);
-            upd.pingMs = ok ? pingMs : -1;
-            upd.testOk = ok;
-            upd.lastStatus = ok ? QStringLiteral("Доступен · %1").arg(message)
-                                : QStringLiteral("Недоступен: %1").arg(message);
-            m_model.updateSlot(row, upd);
-        }
+        setSlotHealth(id, ok, ok ? pingMs : -1,
+                      ok ? QStringLiteral("Доступен · %1").arg(message)
+                         : QStringLiteral("Недоступен: %1").arg(message));
         emit testFinished(id, ok, pingMs, message);
     });
 }
@@ -559,7 +573,8 @@ void ProxyManager::checkSession(Session &s)
         case px::HookOk:
             s.confirmed = true;
             s.lastStatus = status;
-            emit log(QStringLiteral("%1 · прокси «%2» подключён").arg(s.nick, slotName(s.slotId)), 1);
+            emit log(QStringLiteral("%1 · перехват сети установлен, соединения пойдут через «%2»")
+                         .arg(s.nick, slotName(s.slotId)), 1);
             return;
         case px::HookFailed:
         case px::HookLeaked:
@@ -572,11 +587,39 @@ void ProxyManager::checkSession(Session &s)
             return;
         }
     }
-    // События туннеля — в журнал (ошибки — красным).
+    // Сервер игры, к которому шёл клиент, — цель следующих проверок прокси.
+    const quint32 target = cfg->targetAddr;
+    if (target != 0 && target != s.lastTarget) {
+        s.lastTarget = target;
+        const QHostAddress addr(qFromBigEndian(target));
+        const quint16 port = qFromBigEndian(static_cast<quint16>(cfg->targetPort));
+        if (addr != m_probeTarget || port != m_probePort) {
+            m_probeTarget = addr;
+            m_probePort = port;
+            m_settings.setValue(kProbeKey, QStringLiteral("%1:%2").arg(addr.toString()).arg(port));
+        }
+    }
+    // События туннеля — в журнал (ошибки — красным) и в карточку слота.
     if (!status.isEmpty() && status != s.lastStatus) {
         s.lastStatus = status;
-        emit log(s.nick + QStringLiteral(" · ") + status, cfg->tunnelState == px::TunnelError ? 2 : 0);
+        const bool failed = cfg->tunnelState == px::TunnelError;
+        emit log(s.nick + QStringLiteral(" · ") + status, failed ? 2 : 0);
+        if (cfg->tunnelState != px::TunnelIdle)
+            setSlotHealth(s.slotId, !failed, -1, failed ? QStringLiteral("Ошибка в игре: ") + status : status);
     }
+}
+
+void ProxyManager::setSlotHealth(const QString &slotId, bool ok, int pingMs, const QString &status)
+{
+    const int row = m_model.indexOfId(slotId);
+    if (row < 0 || m_model.at(row).isDirect())
+        return;
+    ProxySlot s = m_model.at(row);
+    s.testOk = ok;
+    if (pingMs >= 0 || !ok)
+        s.pingMs = pingMs;
+    s.lastStatus = status;
+    m_model.updateSlot(row, s);
 }
 
 void ProxyManager::failSession(qint64 pid, const QString &reason)

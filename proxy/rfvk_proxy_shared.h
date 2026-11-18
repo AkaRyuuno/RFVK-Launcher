@@ -15,7 +15,7 @@
 namespace rfvk_proxy {
 
 constexpr std::uint32_t kMagic = 0x58504652; // 'RFPX' (RF Proxy)
-constexpr std::uint32_t kVersion = 2;
+constexpr std::uint32_t kVersion = 3;
 
 // Имя отображения: kMappingPrefix + десятичный PID клиента.
 constexpr wchar_t kMappingPrefix[] = L"Local\\RFVK.Proxy.";
@@ -65,6 +65,11 @@ struct SharedConfig {
     volatile std::int32_t tunnelState;      // TunnelState
     volatile std::int32_t connectionsCount; // успешные туннели
     volatile std::int32_t lastError;        // код Winsock последней ошибки
+    // Последний сервер игры, к которому клиент шёл через прокси (сетевой
+    // порядок байт): по нему лаунчер проверяет прокси кнопкой «Проверить».
+    volatile std::uint32_t targetAddr;
+    volatile std::uint16_t targetPort;
+    std::uint16_t reserved2;
     wchar_t statusText[kStatusLen];         // последнее событие (UTF-16)
 };
 #pragma pack(pop)

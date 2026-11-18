@@ -3,6 +3,7 @@
 
 #include <QElapsedTimer>
 #include <QHash>
+#include <QHostAddress>
 #include <QObject>
 #include <QSettings>
 #include <QTimer>
@@ -70,8 +71,10 @@ public:
     Q_INVOKABLE void removeProxy(const QString &id);
     Q_INVOKABLE void setProxyEnabled(const QString &id, bool enabled);
 
-    // Проверка прокси по протоколу (ProxyProbe). testCustomProxy — для
-    // диалога; existingId — редактируемый прокси: пустой pass берётся из него.
+    // Проверка прокси (ProxyProbe): CONNECT к серверу игры — по умолчанию
+    // известный сервер входа, затем последний, к которому шёл клиент.
+    // testCustomProxy — для диалога; existingId — редактируемый прокси:
+    // пустой pass берётся из него.
     Q_INVOKABLE void testProxy(const QString &id);
     Q_INVOKABLE void testCustomProxy(int type, const QString &host, int port, bool auth,
                                      const QString &user, const QString &pass,
@@ -101,6 +104,7 @@ private:
         QElapsedTimer started;
         bool confirmed = false;   // прямой IP — сразу; прокси — по hookStatus
         QString lastStatus;       // последняя строка библиотеки, ушедшая в журнал
+        quint32 lastTarget = 0;   // последний сервер игры из библиотеки (сетевой порядок)
     };
 
     void loadSettings();
@@ -117,6 +121,8 @@ private:
     void failSession(qint64 pid, const QString &reason);
     // Убрать клиент из слота и освободить ресурсы (процесс не трогает).
     void endSession(qint64 pid);
+    // Итог туннеля или проверки — в карточку слота.
+    void setSlotHealth(const QString &slotId, bool ok, int pingMs, const QString &status);
     QString slotName(const QString &slotId) const;
     void runProbe(const ProxySlot &proxy, const std::function<void(bool, int, const QString &)> &done);
 
@@ -124,4 +130,6 @@ private:
     QSettings m_settings;
     QTimer m_pollTimer;
     QHash<qint64, Session> m_sessions;
+    QHostAddress m_probeTarget;  // сервер игры для проверки прокси
+    quint16 m_probePort = 0;
 };
