@@ -75,6 +75,7 @@ int main(int argc, char *argv[])
     // Контроллер доступен в QML как синглтон App (import Rfvk):
     // App.importSession(), App.selectedAccount, App.Active и т.д.
     qmlRegisterSingletonInstance("Rfvk", 1, 0, "App", controller);
+    qmlRegisterSingletonInstance("Rfvk", 1, 0, "ProxyManager", controller->proxyManager());
 
     QQmlApplicationEngine engine;
     // Для скриншотов: RFVK_OPEN=add открывает диалог добавления при старте.

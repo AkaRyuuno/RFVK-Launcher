@@ -58,6 +58,8 @@ Controller::Controller(AccountModel *model, IAuthBackend *backend, QObject *pare
     // Подключение HUD: свои строки пишет в общий журнал.
     m_hud = new HudInjector(this);
     connect(m_hud, &HudInjector::log, this, &Controller::appendLog);
+    connect(&m_proxyManager, &ProxyManager::log, this, &Controller::appendLog);
+    connect(&m_proxyManager, &ProxyManager::toast, this, &Controller::toast);
     // Библиотека автовхода не подключилась — его сессии ждать нечего.
     connect(m_hud, &HudInjector::failed, this, [this](qint64 pid, const QString &dll) {
         if (dll != HudInjector::autoLoginDllPath())
@@ -246,6 +248,7 @@ QVariantMap Controller::accountMap(const Account &a) const
     }
     m[QStringLiteral("characters")] = chars;
     m[QStringLiteral("autoChar")] = m_autoStore.chosenName(a.id);
+    m[QStringLiteral("preferredSlot")] = m_proxyManager.accountPreferredSlot(a.id);
     return m;
 }
 
@@ -517,6 +520,14 @@ void Controller::setAccountFg(const QString &id, const QString &fg)
     emit selectionChanged(); // selectedAccount несёт fgSet
 }
 
+void Controller::setAccountPreferredSlot(const QString &id, const QString &slotId)
+{
+    if (m_model->indexOfId(id) < 0)
+        return;
+    m_proxyManager.setAccountPreferredSlot(id, slotId);
+    emit selectionChanged();
+}
+
 void Controller::setAccountCharacter(const QString &id, const QString &name)
 {
     if (m_model->indexOfId(id) < 0)
@@ -641,6 +652,17 @@ void Controller::startGame(const QString &accountId, const QString &persId, cons
         QStringLiteral("-my_ui_currency_arg=RUB"),
     };
 
+    // Проверяем лимит слотов (максимум 5 окон на один прямой IP или прокси).
+    const QString prefSlot = m_proxyManager.accountPreferredSlot(accountId);
+    const QString slotId = m_proxyManager.allocateSlot(prefSlot);
+    if (slotId.isEmpty()) {
+        const QString msg = QStringLiteral("Свободных слотов нет: прямой IP и прокси заполнены (5/5), в источниках нет рабочих свободных адресов. Добавьте прокси или источник, проверьте источники или дождитесь закрытия окон.");
+        appendLog(msg, 2);
+        emit toast(msg, 2);
+        setError(accountId, msg);
+        return;
+    }
+
     // В лог пишем команду с замаскированным токеном.
     appendLog(QStringLiteral("Запускаю: RF_Online.exe --sz_token=<скрыт> --sz_pers_id=") + persId
                   + QStringLiteral(" -my_ui_locale_arg=ru-RU -my_ui_currency_arg=RUB"),
@@ -655,6 +677,11 @@ void Controller::startGame(const QString &accountId, const QString &persId, cons
         appendLog(QStringLiteral("RF Online запущен · ") + nick, 1);
         if (m_batchTotal <= 1)
             emit toast(QStringLiteral("RF Online запущен · ") + nick, 1);
+        // Учёт в слоте; для прокси — подключение rfvk_proxy.dll. Не вышло с
+        // прокси — клиент уже закрыт (он пошёл бы с реального IP), HUD и
+        // автовход ему не нужны. Прямой IP при сбое учёта просто играет.
+        if (!m_proxyManager.registerProcess(pid, slotId, nick) && slotId != ProxySlot::directId())
+            return;
         // По настройке — подключить улучшенный HUD к этому клиенту (не срывает
         // запуск при неудаче; пропускается, если библиотеки нет рядом с лаунчером).
         if (m_hudEnabled && HudInjector::dllAvailable())

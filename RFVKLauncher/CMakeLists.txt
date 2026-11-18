@@ -12,6 +12,13 @@ qt_add_executable(RFVKLauncher
     src/AutoLoginStore.cpp src/AutoLoginStore.h
     src/AutoLoginSession.cpp src/AutoLoginSession.h
     ${CMAKE_SOURCE_DIR}/autologin/rfvk_autologin_shared.h
+    ${CMAKE_SOURCE_DIR}/proxy/rfvk_proxy_shared.h
+    src/ProxySlot.h
+    src/ProxyModel.cpp src/ProxyModel.h
+    src/ProxyProbe.cpp src/ProxyProbe.h
+    src/ProxySource.cpp src/ProxySource.h
+    src/ProxySourceModel.cpp src/ProxySourceModel.h
+    src/ProxyManager.cpp src/ProxyManagerSources.cpp src/ProxyManager.h
     src/Controller.cpp src/Controller.h
 )
 
@@ -46,6 +53,11 @@ qt_add_qml_module(RFVKLauncher
         qml/components/AppField.qml
         qml/components/AppSelect.qml
         qml/AutoLoginCard.qml
+        qml/ProxyCard.qml
+        qml/ProxyPanel.qml
+        qml/AddProxyDialog.qml
+        qml/ProxySourceCard.qml
+        qml/AddSourceDialog.qml
     RESOURCES
         resources/app.png
         resources/fonts/Exo2-Variable.ttf
@@ -57,7 +69,7 @@ qt_add_qml_module(RFVKLauncher
 
 target_compile_definitions(RFVKLauncher PRIVATE RFVK_VERSION="${PROJECT_VERSION}")
 # Формат общей памяти автовхода — общий с 32-битной rfvk_autologin.dll.
-target_include_directories(RFVKLauncher PRIVATE "${CMAKE_SOURCE_DIR}/autologin")
+target_include_directories(RFVKLauncher PRIVATE "${CMAKE_SOURCE_DIR}/autologin" "${CMAKE_SOURCE_DIR}/proxy")
 
 set_target_properties(RFVKLauncher PROPERTIES
     WIN32_EXECUTABLE TRUE
@@ -91,8 +103,9 @@ endif()
 # тот сам находит x86-инструменты, консоль разработчика x86 и vcvarsall не нужны.
 # Собирается вместе с лаунчером и кладётся рядом с ним.
 option(RFVK_AUTOLOGIN "Собирать 32-битную rfvk_autologin.dll (автовход)" ON)
+option(RFVK_PROXY "Собирать 32-битную rfvk_proxy.dll (сетевой прокси)" ON)
 
-if(WIN32 AND RFVK_AUTOLOGIN)
+if(WIN32 AND (RFVK_AUTOLOGIN OR RFVK_PROXY))
     # Та же Visual Studio, что собирает лаунчер.
     if(CMAKE_GENERATOR MATCHES "^Visual Studio")
         set(_rfvk_x86_gen_default "${CMAKE_GENERATOR}")
@@ -105,23 +118,25 @@ if(WIN32 AND RFVK_AUTOLOGIN)
         elseif(MSVC_VERSION GREATER_EQUAL 1920)
             set(_rfvk_x86_gen_default "Visual Studio 16 2019")
         endif()
-        # <VS>/VC/Tools/MSVC/<версия>/bin/Hostx64/x64/cl.exe → <VS>
+        # <VS>/VC/Tools/MSVC/<версия>/bin/Hostx64/x64/cl.exe -> <VS>
         string(REGEX REPLACE "/VC/Tools/MSVC/.*$" "" _rfvk_x86_inst_default "${CMAKE_CXX_COMPILER}")
         if(_rfvk_x86_inst_default STREQUAL CMAKE_CXX_COMPILER)
             set(_rfvk_x86_inst_default "")
         endif()
     endif()
     set(RFVK_X86_GENERATOR "${_rfvk_x86_gen_default}" CACHE STRING
-        "Генератор Visual Studio для 32-битной rfvk_autologin.dll")
+        "Генератор Visual Studio для 32-битных библиотек (autologin, proxy)")
     set(RFVK_X86_VS_INSTANCE "${_rfvk_x86_inst_default}" CACHE PATH
-        "Каталог Visual Studio для rfvk_autologin.dll (пусто — выберет CMake)")
+        "Каталог Visual Studio для 32-битных библиотек (пусто — выберет CMake)")
     if(NOT RFVK_X86_GENERATOR)
         message(FATAL_ERROR
-            "Не удалось определить генератор Visual Studio для rfvk_autologin.dll "
+            "Не удалось определить генератор Visual Studio для 32-битных DLL "
             "(компилятор: ${CMAKE_CXX_COMPILER}). Укажите -DRFVK_X86_GENERATOR=\"Visual Studio 17 2022\" "
-            "или соберите без автовхода: -DRFVK_AUTOLOGIN=OFF.")
+            "или отключите: -DRFVK_AUTOLOGIN=OFF -DRFVK_PROXY=OFF.")
     endif()
+endif()
 
+if(WIN32 AND RFVK_AUTOLOGIN)
     set(_rfvk_x86_dir "${CMAKE_BINARY_DIR}/autologin-x86")
     set(_rfvk_x86_args
         -S "${CMAKE_SOURCE_DIR}/autologin" -B "${_rfvk_x86_dir}"
@@ -140,13 +155,9 @@ if(WIN32 AND RFVK_AUTOLOGIN)
     )
     if(NOT _rfvk_x86_rc EQUAL 0)
         message(FATAL_ERROR
-            "Не удалось настроить 32-битную rfvk_autologin.dll (${RFVK_X86_GENERATOR}, -A Win32).
-"
-            "Нужна Visual Studio с компонентом «MSVC x86/x64» (C++ x86 build tools).
-"
-            "Собрать лаунчер без автовхода: -DRFVK_AUTOLOGIN=OFF.
-
-${_rfvk_x86_out}")
+            "Не удалось настроить 32-битную rfvk_autologin.dll (${RFVK_X86_GENERATOR}, -A Win32).\n"
+            "Нужна Visual Studio с компонентом «MSVC x86/x64» (C++ x86 build tools).\n"
+            "Собрать лаунчер без автовхода: -DRFVK_AUTOLOGIN=OFF.\n\n${_rfvk_x86_out}")
     endif()
 
     set(_rfvk_autologin_dll "${CMAKE_BINARY_DIR}/rfvk_autologin.dll")
@@ -167,9 +178,50 @@ else()
     set(_rfvk_autologin_summary "нет (RFVK_AUTOLOGIN=OFF) — автовход в лаунчере будет недоступен")
 endif()
 
+# ── 32-битная rfvk_proxy.dll (прокси для клиента) ────────────────────────────
+# Так же, как rfvk_autologin.dll: отдельный проект Win32, всегда Release.
+if(WIN32 AND RFVK_PROXY)
+    set(_rfvk_proxy_dir "${CMAKE_BINARY_DIR}/proxy-x86")
+    set(_rfvk_proxy_args
+        -S "${CMAKE_SOURCE_DIR}/proxy" -B "${_rfvk_proxy_dir}"
+        -G "${RFVK_X86_GENERATOR}" -A Win32
+        "-DRFVK_OUTPUT_DIR=${CMAKE_BINARY_DIR}")
+    if(RFVK_X86_VS_INSTANCE)
+        list(APPEND _rfvk_proxy_args "-DCMAKE_GENERATOR_INSTANCE=${RFVK_X86_VS_INSTANCE}")
+    endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env --unset=Platform --unset=VSCMD_ARG_TGT_ARCH
+                "${CMAKE_COMMAND}" ${_rfvk_proxy_args}
+        RESULT_VARIABLE _rfvk_proxy_rc
+        OUTPUT_VARIABLE _rfvk_proxy_out
+        ERROR_VARIABLE _rfvk_proxy_out
+    )
+    if(NOT _rfvk_proxy_rc EQUAL 0)
+        message(FATAL_ERROR
+            "Не удалось настроить 32-битную rfvk_proxy.dll (${RFVK_X86_GENERATOR}, -A Win32).\n"
+            "Собрать без прокси: -DRFVK_PROXY=OFF.\n\n${_rfvk_proxy_out}")
+    endif()
+
+    set(_rfvk_proxy_dll "${CMAKE_BINARY_DIR}/rfvk_proxy.dll")
+    add_custom_target(rfvk_proxy ALL
+        COMMAND "${CMAKE_COMMAND}" -E env --unset=Platform --unset=VSCMD_ARG_TGT_ARCH
+                "${CMAKE_COMMAND}" --build "${_rfvk_proxy_dir}" --config Release
+        BYPRODUCTS "${_rfvk_proxy_dll}"
+        COMMENT "Сборка 32-битной rfvk_proxy.dll (${RFVK_X86_GENERATOR}, Win32)"
+        USES_TERMINAL
+        VERBATIM
+    )
+    add_dependencies(RFVKLauncher rfvk_proxy)
+    install(FILES "${_rfvk_proxy_dll}" DESTINATION .)
+    set(_rfvk_proxy_summary "да — ${RFVK_X86_GENERATOR}, Win32 (${_rfvk_proxy_dir})")
+else()
+    set(_rfvk_proxy_summary "нет (RFVK_PROXY=OFF) — сетевой прокси в лаунчере будет недоступен")
+endif()
+
 message(STATUS "RFVKLauncher ${PROJECT_VERSION}: Qt ${Qt6_VERSION} (${Qt6_DIR})")
 message(STATUS "  лаунчер (x64):            ${CMAKE_BINARY_DIR}/RFVKLauncher.exe")
 message(STATUS "  rfvk_autologin.dll (x86): ${_rfvk_autologin_summary}")
+message(STATUS "  rfvk_proxy.dll (x86):      ${_rfvk_proxy_summary}")
 message(STATUS "  seirin.dll (HUD):         не собирается — кладётся рядом с лаунчером вручную")
 
 # Поставка: cmake --install <build> --prefix dist (windeployqt для QML-импортов).

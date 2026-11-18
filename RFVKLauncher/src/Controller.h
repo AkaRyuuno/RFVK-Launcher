@@ -2,6 +2,7 @@
 #include "AccountModel.h"
 #include "AutoLoginStore.h"
 #include "HudInjector.h"
+#include "ProxyManager.h"
 #include "IAuthBackend.h"
 #include <QHash>
 #include <QList>
@@ -54,6 +55,7 @@ class Controller : public QObject {
     // autoLoginAvailable — лежит ли rfvk_autologin.dll рядом с лаунчером.
     Q_PROPERTY(bool autoLoginEnabled READ autoLoginEnabled WRITE setAutoLoginEnabled NOTIFY autoLoginChanged)
     Q_PROPERTY(bool autoLoginAvailable READ autoLoginAvailable NOTIFY autoLoginChanged)
+    Q_PROPERTY(ProxyManager *proxyManager READ proxyManager CONSTANT)
 
 public:
     // Состояние сессии для QML: Controller.Active, Controller.Expiring и т.д.
@@ -86,6 +88,7 @@ public:
     bool hudAvailable() const { return HudInjector::dllAvailable(); }
     bool autoLoginEnabled() const { return m_autoLoginEnabled; }
     bool autoLoginAvailable() const { return HudInjector::autoLoginAvailable(); }
+    ProxyManager *proxyManager() { return &m_proxyManager; }
 
 public slots:
     // Выбор: одиночный (обычный клик), переключение (Ctrl+клик), диапазон
@@ -113,6 +116,7 @@ public slots:
     void setAccountFg(const QString &id, const QString &fg);
     // Персонаж для автовхода по имени из сохранённого списка (пусто — не выбирать).
     void setAccountCharacter(const QString &id, const QString &name);
+    void setAccountPreferredSlot(const QString &id, const QString &slotId);
     void dismissError();
 
 signals:
@@ -173,6 +177,7 @@ private:
     bool m_hudEnabled = false;
     bool m_autoLoginEnabled = true;
     AutoLoginStore m_autoStore;
+    ProxyManager m_proxyManager;
     QHash<qint64, AutoLoginSession *> m_autoSessions; // pid клиента -> сессия автовхода
     QString m_progressStep;
     int m_progressIndex = 0;

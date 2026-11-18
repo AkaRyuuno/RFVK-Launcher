@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Layouts
 import Rfvk
 
 // Правая зона: панель выбранного аккаунта — крупный заголовок с действиями,
@@ -211,6 +212,86 @@ Item {
         AutoLoginCard {
             width: parent.width
             acc: panel.acc
+        }
+
+        // ── Маршрутизация: выбор слота (Direct / Proxy) ──
+        Rectangle {
+            width: parent.width
+            radius: Theme.rCard
+            color: Theme.surface
+            border.width: 1
+            border.color: Theme.border
+            implicitHeight: slotRow.implicitHeight + 2 * Theme.s12
+
+            RowLayout {
+                id: slotRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Theme.s12
+                spacing: Theme.s12
+
+                Rectangle {
+                    Layout.preferredWidth: 32
+                    Layout.preferredHeight: 32
+                    radius: Theme.rField
+                    color: Theme.raised
+                    Icon {
+                        anchors.centerIn: parent
+                        name: "globe"
+                        size: 16
+                        color: Theme.accent
+                    }
+                }
+
+                Column {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    AppText {
+                        text: Strings.slotSelectorLabel
+                        role: "bodyStrong"
+                    }
+                    AppText {
+                        text: Strings.slotSelectorHint
+                        role: "caption"
+                        color: Theme.muted
+                    }
+                }
+
+                AppSelect {
+                    id: slotSelect
+                    Layout.preferredWidth: 260
+                    // «Авто» — первым пунктом, дальше слоты из ProxyManager.
+                    model: [{ label: Strings.slotAuto, value: "auto" }].concat(ProxyManager.slotOptions)
+
+                    Component.onCompleted: syncIndex()
+                    Connections {
+                        target: panel
+                        function onAccChanged() { slotSelect.syncIndex() }
+                    }
+                    Connections {
+                        target: ProxyManager
+                        function onSlotsChanged() { slotSelect.syncIndex() }
+                    }
+
+                    function syncIndex() {
+                        var target = (panel.acc && panel.acc.preferredSlot) ? panel.acc.preferredSlot : "auto"
+                        var opts = slotSelect.model
+                        for (var i = 0; i < opts.length; ++i) {
+                            if (opts[i].value === target) {
+                                slotSelect.currentIndex = i
+                                return
+                            }
+                        }
+                        slotSelect.currentIndex = 0
+                    }
+
+                    onActivated: {
+                        if (panel.acc && panel.acc.id)
+                            App.setAccountPreferredSlot(panel.acc.id, currentValue)
+                    }
+                }
+            }
         }
 
         // ── Главная кнопка (или «Повторить запуск» после ошибки) ──
