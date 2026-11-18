@@ -15,6 +15,7 @@ Rectangle {
     property bool selected: false
     property bool multi: false   // выделено несколько аккаунтов
     property bool compact: false
+    property bool dragPreview: false
 
     // modifiers — Qt.ControlModifier / Qt.ShiftModifier (мультивыбор).
     signal clicked(int modifiers)
@@ -25,14 +26,17 @@ Rectangle {
 
     implicitHeight: 64
     radius: Theme.rCard
-    color: selected ? Theme.badgeFill(Theme.accent) : (area.containsMouse ? Theme.raised : "transparent")
-    border.width: selected ? 1 : 0
+    color: dragPreview ? Theme.raised
+         : selected ? Theme.badgeFill(Theme.accent)
+         : area.containsMouse ? Theme.raised : "transparent"
+    border.width: dragPreview ? 2 : (selected ? 1 : 0)
     border.color: Theme.accent
     Behavior on color { ColorAnimation { duration: 90 } }
 
     MouseArea {
         id: area
         anchors.fill: parent
+        enabled: !card.dragPreview
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         cursorShape: Qt.PointingHandCursor

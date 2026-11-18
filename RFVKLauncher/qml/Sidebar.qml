@@ -54,7 +54,10 @@ Rectangle {
         // Список аккаунтов.
         ListView {
             id: list
-            property string dragId: ""
+            property var dragAccount: null
+            readonly property string dragId: dragAccount ? dragAccount.accId : ""
+            readonly property point dragPosition: mapFromItem(null, reorder.centroid.scenePosition)
+            property real dragOffsetY: 0
             property string dropId: ""
             property bool dropAfter: false
             property real dropY: 0
@@ -73,6 +76,10 @@ Rectangle {
             ScrollBar.vertical: ScrollBar {
                 id: scrollBar
                 policy: ScrollBar.AsNeeded
+            }
+
+            onDragPositionChanged: {
+                if (dragId.length > 0) updateDropTarget(dragPosition)
             }
 
             function updateDropTarget(position) {
@@ -106,15 +113,21 @@ Rectangle {
 
                 onActiveChanged: {
                     if (!active) return
-                    const press = list.mapToItem(list.contentItem, centroid.pressPosition)
+                    const press = list.contentItem.mapFromItem(null, centroid.scenePressPosition)
                     const row = list.itemAt(press.x, press.y)
                     if (row) {
-                        list.dragId = row.accId
-                        list.updateDropTarget(centroid.position)
+                        list.dragOffsetY = press.y - row.y
+                        // Автопрокрутка может выгрузить исходную карточку.
+                        list.dragAccount = {
+                            accId: row.accId,
+                            nick: row.nick,
+                            login: row.login,
+                            loginKind: row.loginKind,
+                            sessionState: row.sessionState,
+                            initials: row.initials
+                        }
+                        list.updateDropTarget(list.dragPosition)
                     }
-                }
-                onCentroidChanged: {
-                    if (list.dragId.length > 0) list.updateDropTarget(centroid.position)
                 }
                 onGrabChanged: (transition, point) => {
                     if (transition !== PointerDevice.UngrabExclusive
@@ -124,7 +137,7 @@ Rectangle {
                         if (list.dropId.length > 0)
                             App.moveAccount(list.dragId, list.dropId, list.dropAfter)
                     }
-                    list.dragId = ""
+                    list.dragAccount = null
                     list.dropId = ""
                 }
             }
@@ -134,7 +147,7 @@ Rectangle {
                 repeat: true
                 running: list.dragId.length > 0 && list.contentHeight + list.topMargin + list.bottomMargin > list.height
                 onTriggered: {
-                    const point = reorder.centroid.position
+                    const point = list.dragPosition
                     if (!list.contains(point)) return
                     const edge = 32
                     const minY = list.originY - list.topMargin
@@ -147,6 +160,7 @@ Rectangle {
             }
 
             Rectangle {
+                parent: list
                 x: list.leftMargin
                 y: list.dropY - height / 2
                 width: list.width - list.leftMargin - list.rightMargin
@@ -170,7 +184,7 @@ Rectangle {
                 initials: model.initials
                 selected: App.selectedIds.indexOf(model.accId) >= 0
                 multi: App.selectedCount > 1
-                opacity: list.dragId === accId ? 0.5 : 1
+                opacity: list.dragId === accId ? 0.35 : 1
                 // Обычный клик — один аккаунт; Ctrl — добавить/убрать; Shift — диапазон.
                 onClicked: (mods) => {
                     if (mods & Qt.ShiftModifier) App.selectRange(model.accId)
@@ -264,5 +278,25 @@ Rectangle {
                 elide: Text.ElideRight
             }
         }
+    }
+
+    AccountCard {
+        parent: Overlay.overlay
+        visible: list.dragAccount !== null
+        dragPreview: true
+        width: Theme.sidebarW - list.leftMargin - list.rightMargin
+        height: implicitHeight
+        x: parent && visible ? list.mapToItem(parent, list.width + Theme.s4, 0).x : 0
+        y: {
+            if (!parent || !visible) return 0
+            const top = Math.max(0, Math.min(list.height - height, list.dragPosition.y - list.dragOffsetY))
+            return list.mapToItem(parent, 0, top).y
+        }
+        accId: list.dragId
+        nick: list.dragAccount ? list.dragAccount.nick : ""
+        login: list.dragAccount ? list.dragAccount.login : ""
+        loginKind: list.dragAccount ? list.dragAccount.loginKind : ""
+        sessionState: list.dragAccount ? list.dragAccount.sessionState : App.None
+        initials: list.dragAccount ? list.dragAccount.initials : "?"
     }
 }
